@@ -5,7 +5,7 @@ Direct installation script for TRELLIS2 dependencies.
 This installs all dependencies INTO THE HOST PYTHON ENVIRONMENT,
 bypassing the isolated venv. Use this when you want to run with direct_mode=True.
 
-Downloads pre-built CUDA wheels for Python 3.10 from JeffreyXiang's repository.
+Uses pre-built wheels from pozzettiandrea/cumesh-wheels for CUDA 12.8 + PyTorch 2.8.0.
 
 WARNING: This may cause conflicts with other ComfyUI nodes. Use at your own risk.
 
@@ -21,16 +21,8 @@ import subprocess
 from pathlib import Path
 
 
-# Wheel download URLs for cp310 Linux x86_64 from JeffreyXiang's GitHub
-WHEEL_BASE_URL = "https://github.com/JeffreyXiang/Storages/releases/download/Space_Wheels_251210"
-
-CUDA_WHEELS = [
-    f"{WHEEL_BASE_URL}/cumesh-0.0.1-cp310-cp310-linux_x86_64.whl",
-    f"{WHEEL_BASE_URL}/flex_gemm-0.0.1-cp310-cp310-linux_x86_64.whl",
-    f"{WHEEL_BASE_URL}/o_voxel-0.0.1-cp310-cp310-linux_x86_64.whl",
-    f"{WHEEL_BASE_URL}/nvdiffrast-0.3.3-cp310-cp310-linux_x86_64.whl",  # 0.3.3 exists, not 0.3.5
-    f"{WHEEL_BASE_URL}/nvdiffrec_render-0.0.0-cp310-cp310-linux_x86_64.whl",
-]
+# Pre-built wheel sources for CUDA 12.8 + PyTorch 2.8.0
+CUMESH_WHEEL_INDEX = "https://pozzettiandrea.github.io/cumesh-wheels/cu128-torch280/"
 
 
 def main():
@@ -41,18 +33,10 @@ def main():
     print("WARNING: This installs dependencies into your main Python environment.")
     print("         This may conflict with other packages. Use at your own risk.")
     print()
+    print("Using pre-built wheels for CUDA 12.8 + PyTorch 2.8.0")
+    print()
     
-    # Check Python version
-    py_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-    print(f"Python version: {py_version}")
-    
-    if sys.version_info[:2] != (3, 10):
-        print()
-        print("WARNING: Pre-built wheels are for Python 3.10 (cp310).")
-        print(f"         Your Python is {py_version}. Wheels may not work!")
-        print()
-    
-    # PyPI packages (platform-independent)
+    # PyPI packages
     pypi_packages = [
         "huggingface_hub>=0.20.0,<1.0.0",
         "hf_transfer",
@@ -88,33 +72,70 @@ def main():
         print(f"ERROR: Failed to install PyPI packages: {e}")
         return 1
     
-    # Install CUDA extensions from GitHub
+    # Install cumesh from pre-built wheels (CUDA 12.8 + PyTorch 2.8.0)
     print()
     print("=" * 70)
-    print("Step 2: Installing CUDA extensions (cp310 Linux x86_64)...")
+    print("Step 2: Installing CuMesh (CUDA 12.8 + PyTorch 2.8.0 wheels)...")
     print("=" * 70)
     
-    for wheel_url in CUDA_WHEELS:
-        wheel_name = wheel_url.split("/")[-1]
-        print(f"\nInstalling {wheel_name}...")
+    try:
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "cumesh", "--find-links", CUMESH_WHEEL_INDEX
+        ])
+        print("         cumesh installed successfully!")
+    except subprocess.CalledProcessError as e:
+        print(f"WARNING: Failed to install cumesh: {e}")
+    
+    # Install nvdiffrast from source
+    print()
+    print("=" * 70)
+    print("Step 3: Installing nvdiffrast from source...")
+    print("=" * 70)
+    
+    try:
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "git+https://github.com/NVlabs/nvdiffrast.git",
+            "--no-build-isolation"
+        ])
+        print("         nvdiffrast installed successfully!")
+    except subprocess.CalledProcessError as e:
+        print(f"WARNING: Failed to install nvdiffrast: {e}")
+    
+    # Build flex_gemm and o_voxel from source
+    print()
+    print("=" * 70)
+    print("Step 4: Building flex_gemm and o_voxel from source...")
+    print("=" * 70)
+    
+    build_dir = Path(__file__).parent / "_build_temp"
+    build_dir.mkdir(exist_ok=True)
+    
+    source_repos = [
+        ("flex_gemm", "https://github.com/JeffreyXiang/FlexGEMM.git"),
+        ("o_voxel", "https://github.com/JeffreyXiang/o-voxel.git"),
+    ]
+    
+    for pkg_name, repo_url in source_repos:
+        print(f"\nBuilding {pkg_name} from source...")
+        pkg_dir = build_dir / pkg_name
+        
+        if not pkg_dir.exists():
+            try:
+                subprocess.check_call(["git", "clone", "--depth", "1", repo_url, str(pkg_dir)])
+            except subprocess.CalledProcessError as e:
+                print(f"WARNING: Failed to clone {pkg_name}: {e}")
+                continue
+        
         try:
             subprocess.check_call([
-                sys.executable, "-m", "pip", "install", "--no-deps", wheel_url
+                sys.executable, "-m", "pip", "install",
+                str(pkg_dir), "--no-build-isolation"
             ])
-        except subprocess.CalledProcessError:
-            # If wheel fails, try installing nvdiffrast from GitHub source
-            if "nvdiffrast" in wheel_name:
-                print("         Trying to install nvdiffrast from GitHub source...")
-                try:
-                    subprocess.check_call([
-                        sys.executable, "-m", "pip", "install",
-                        "git+https://github.com/NVlabs/nvdiffrast.git",
-                        "--no-build-isolation"
-                    ])
-                except subprocess.CalledProcessError as e:
-                    print(f"WARNING: Failed to install nvdiffrast: {e}")
-            else:
-                print(f"WARNING: Failed to install {wheel_name}")
+            print(f"         {pkg_name} built successfully!")
+        except subprocess.CalledProcessError as e:
+            print(f"WARNING: Failed to build {pkg_name}: {e}")
     
     print()
     print("=" * 70)
