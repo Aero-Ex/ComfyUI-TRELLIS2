@@ -43,7 +43,10 @@ Supports 2-8 images for best results.
 """
 
     def get_conditioning(self, model_config, images, masks, include_1024=True, background_color="black"):
-        from utils.stages import run_multi_conditioning
+        try:
+            from .utils.stages import run_multi_conditioning
+        except ImportError:
+            from utils.stages import run_multi_conditioning
 
         conditioning, preprocessed_images = run_multi_conditioning(
             model_config=model_config,
@@ -107,7 +110,10 @@ The model will incorporate features from all input views for more complete geome
         max_tokens=49152,
     ):
         import trimesh as Trimesh
-        from utils.stages import run_multi_image_shape_generation
+        try:
+            from .utils.stages import run_multi_image_shape_generation
+        except ImportError:
+            from utils.stages import run_multi_image_shape_generation
 
         shape_result = run_multi_image_shape_generation(
             model_config=model_config,
@@ -175,7 +181,10 @@ Uses the same multi-image mode as the shape generation to ensure consistency.
     ):
         import numpy as np
         import trimesh as Trimesh
-        from utils.stages import run_multi_image_texture_generation
+        try:
+            from .utils.stages import run_multi_image_texture_generation
+        except ImportError:
+            from utils.stages import run_multi_image_texture_generation
 
         texture_result = run_multi_image_texture_generation(
             model_config=model_config,
