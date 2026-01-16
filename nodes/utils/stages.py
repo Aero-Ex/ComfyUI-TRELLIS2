@@ -278,7 +278,7 @@ def run_shape_generation(
     # Convert mesh to CPU arrays for output (with coordinate conversion)
     # Unify face orientations using CuMesh
     cumesh = CuMesh.CuMesh()
-    cumesh.init(mesh.vertices, mesh.faces.int())
+    cumesh.init(mesh.vertices.cuda(), mesh.faces.cuda().int())
     cumesh.unify_face_orientations()
     unified_verts, unified_faces = cumesh.read()
 
@@ -401,7 +401,7 @@ def run_texture_generation(
     # Convert mesh to outputs
     # Unify face orientations
     cumesh = CuMesh.CuMesh()
-    cumesh.init(mesh.vertices, mesh.faces.int())
+    cumesh.init(mesh.vertices.cuda(), mesh.faces.cuda().int())
     cumesh.unify_face_orientations()
     unified_verts, unified_faces = cumesh.read()
 
@@ -650,7 +650,7 @@ def run_multi_image_shape_generation(
 
     # Convert mesh to CPU arrays for output
     cumesh = CuMesh.CuMesh()
-    cumesh.init(mesh.vertices, mesh.faces.int())
+    cumesh.init(mesh.vertices.cuda(), mesh.faces.cuda().int())
     cumesh.unify_face_orientations()
     unified_verts, unified_faces = cumesh.read()
 
@@ -771,7 +771,7 @@ def run_multi_image_texture_generation(
 
     # Convert mesh to outputs
     cumesh = CuMesh.CuMesh()
-    cumesh.init(mesh.vertices, mesh.faces.int())
+    cumesh.init(mesh.vertices.cuda(), mesh.faces.cuda().int())
     cumesh.unify_face_orientations()
     unified_verts, unified_faces = cumesh.read()
 
