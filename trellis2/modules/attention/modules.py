@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .full_attn import scaled_dot_product_attention
 from .rope import RotaryPositionEmbedder
+from ..sparse.linear import SparseLinear
+from ...utils.gguf_utils import GGMLLayer, dequantize_tensor
 
 
 class MultiHeadRMSNorm(nn.Module):
@@ -12,8 +14,29 @@ class MultiHeadRMSNorm(nn.Module):
         self.scale = dim ** 0.5
         self.gamma = nn.Parameter(torch.ones(heads, dim))
 
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        gamma_key = f"{prefix}gamma"
+        if gamma_key in state_dict:
+            gamma = state_dict[gamma_key]
+            if hasattr(gamma, "tensor_type") and gamma.tensor_type not in {None, 0, 1}:
+                self.gamma = nn.Parameter(gamma, requires_grad=False)
+                state_dict.pop(gamma_key)
+        nn.Module._load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return (F.normalize(x.float(), dim = -1) * self.gamma * self.scale).to(x.dtype)
+        gamma = self.gamma
+        # Always ensure gamma is on the correct device and correct dtype
+        # For quantized GGUF tensors, dequantize first
+        if hasattr(gamma, "tensor_type") and gamma.tensor_type not in {None, 0, 1}:
+            gamma = dequantize_tensor(gamma, x.dtype, device=x.device)
+        else:
+            # Always move to ensure correct device (nn.Parameter.device may be unreliable)
+            if isinstance(gamma, torch.nn.Parameter):
+                gamma = gamma.data.to(x.device)
+            else:
+                gamma = gamma.to(x.device)
+        return (F.normalize(x.float(), dim = -1) * gamma * self.scale).to(x.dtype)
+
     
 
 class MultiHeadAttention(nn.Module):
@@ -52,16 +75,16 @@ class MultiHeadAttention(nn.Module):
         self.qk_rms_norm = qk_rms_norm
 
         if self._type == "self":
-            self.to_qkv = nn.Linear(channels, channels * 3, bias=qkv_bias)
+            self.to_qkv = SparseLinear(channels, channels * 3, bias=qkv_bias)
         else:
-            self.to_q = nn.Linear(channels, channels, bias=qkv_bias)
-            self.to_kv = nn.Linear(self.ctx_channels, channels * 2, bias=qkv_bias)
+            self.to_q = SparseLinear(channels, channels, bias=qkv_bias)
+            self.to_kv = SparseLinear(self.ctx_channels, channels * 2, bias=qkv_bias)
             
         if self.qk_rms_norm:
             self.q_rms_norm = MultiHeadRMSNorm(self.head_dim, num_heads)
             self.k_rms_norm = MultiHeadRMSNorm(self.head_dim, num_heads)
             
-        self.to_out = nn.Linear(channels, channels)
+        self.to_out = SparseLinear(channels, channels)
     
     def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None, phases: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, L, C = x.shape

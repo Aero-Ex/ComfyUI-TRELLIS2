@@ -22,6 +22,8 @@ def get_model_manager(
     resolution: str = "1024_cascade",
     attn_backend: str = "flash_attn",
     vram_mode: str = "keep_loaded",
+    enable_gguf: bool = False,
+    gguf_quant: str = "Q8_0",
 ) -> "LazyModelManager":
     """
     Get or create the global model manager.
@@ -36,15 +38,27 @@ def get_model_manager(
         LazyModelManager instance
     """
     global _LAZY_MANAGER
+    
+    config_changed = False
+    change_reason = ""
+    if _LAZY_MANAGER is not None:
+        if _LAZY_MANAGER.model_name != model_name: config_changed = True; change_reason = "model_name"
+        elif _LAZY_MANAGER.resolution != resolution: config_changed = True; change_reason = "resolution"
+        elif _LAZY_MANAGER.attn_backend != attn_backend: config_changed = True; change_reason = "attn_backend"
+        elif _LAZY_MANAGER.vram_mode != vram_mode: config_changed = True; change_reason = "vram_mode"
+        elif _LAZY_MANAGER.enable_gguf != enable_gguf: config_changed = True; change_reason = "enable_gguf"
+        elif _LAZY_MANAGER.gguf_quant != gguf_quant: config_changed = True; change_reason = "gguf_quant"
 
     if _LAZY_MANAGER is None:
-        _LAZY_MANAGER = LazyModelManager(model_name, resolution, attn_backend, vram_mode)
-    elif (_LAZY_MANAGER.model_name != model_name or
-          _LAZY_MANAGER.resolution != resolution or
-          _LAZY_MANAGER.vram_mode != vram_mode):
+        print("[TRELLIS2-DEBUG] get_model_manager: Creating NEW LazyModelManager", file=sys.stderr)
+        _LAZY_MANAGER = LazyModelManager(model_name, resolution, attn_backend, vram_mode, enable_gguf, gguf_quant)
+    elif config_changed:
         # Config changed, recreate manager
+        print(f"[TRELLIS2-DEBUG] get_model_manager: Config changed ({change_reason}), recreating manager", file=sys.stderr)
         _LAZY_MANAGER.cleanup()
-        _LAZY_MANAGER = LazyModelManager(model_name, resolution, attn_backend, vram_mode)
+        _LAZY_MANAGER = LazyModelManager(model_name, resolution, attn_backend, vram_mode, enable_gguf, gguf_quant)
+    else:
+        print("[TRELLIS2-DEBUG] get_model_manager: Reusing existing LazyModelManager", file=sys.stderr)
 
     return _LAZY_MANAGER
 
@@ -116,11 +130,22 @@ class LazyModelManager:
         resolution: str = "1024_cascade",
         attn_backend: str = "flash_attn",
         vram_mode: str = "keep_loaded",
+        enable_gguf: bool = False,
+        gguf_quant: str = "Q8_0",
     ):
         self.model_name = model_name
         self.resolution = resolution
         self.attn_backend = attn_backend
         self.vram_mode = vram_mode
+        self.enable_gguf = enable_gguf
+        self.gguf_quant = gguf_quant
+
+        print(f"[TRELLIS2-DEBUG] LazyModelManager initialized:", file=sys.stderr)
+        print(f"[TRELLIS2-DEBUG]   - model_name: {model_name}", file=sys.stderr)
+        print(f"[TRELLIS2-DEBUG]   - resolution: {resolution}", file=sys.stderr)
+        print(f"[TRELLIS2-DEBUG]   - vram_mode: {vram_mode}", file=sys.stderr)
+        print(f"[TRELLIS2-DEBUG]   - enable_gguf: {enable_gguf}", file=sys.stderr)
+        print(f"[TRELLIS2-DEBUG]   - gguf_quant: {gguf_quant}", file=sys.stderr)
 
         # Track loaded models
         self.dinov3_model = None
@@ -183,14 +208,17 @@ class LazyModelManager:
                 self.resolution, SHAPE_MODELS_BY_RESOLUTION['1024_cascade']
             )
 
-            # Enable disk offload for disk_offload mode (models deleted after use, reloaded from disk)
-            enable_disk_offload = (self.vram_mode == "disk_offload")
+            # Enable disk offload for cpu_offload and disk_offload modes
+            # (models are deleted after use and need to be reloaded from disk)
+            enable_disk_offload = (self.vram_mode in ("cpu_offload", "disk_offload"))
 
             print(f"[TRELLIS2] Loading shape pipeline...", file=sys.stderr)
             self.shape_pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
                 self.model_name,
                 models_to_load=shape_models,
                 enable_disk_offload=enable_disk_offload,
+                enable_gguf=self.enable_gguf,
+                gguf_quant=self.gguf_quant,
             )
             self.shape_pipeline.default_pipeline_type = self.resolution
             self.shape_pipeline._device = device
@@ -227,14 +255,17 @@ class LazyModelManager:
                 self.resolution, TEXTURE_MODELS_BY_RESOLUTION['1024_cascade']
             )
 
-            # Enable disk offload for disk_offload mode (models deleted after use, reloaded from disk)
-            enable_disk_offload = (self.vram_mode == "disk_offload")
+            # Enable disk offload for cpu_offload and disk_offload modes
+            # (models are deleted after use and need to be reloaded from disk)
+            enable_disk_offload = (self.vram_mode in ("cpu_offload", "disk_offload"))
 
             print(f"[TRELLIS2] Loading texture pipeline...", file=sys.stderr)
             self.texture_pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
                 self.model_name,
                 models_to_load=texture_models,
                 enable_disk_offload=enable_disk_offload,
+                enable_gguf=self.enable_gguf,
+                gguf_quant=self.gguf_quant,
             )
             self.texture_pipeline.default_pipeline_type = texture_resolution
             self.texture_pipeline._device = device

@@ -54,7 +54,7 @@ class SLatFlowModel(nn.Module):
         if share_mod:
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(model_channels, 6 * model_channels, bias=True)
+                sp.SparseLinear(model_channels, 6 * model_channels, bias=True)
             )
 
         if pe_mode == "ape":

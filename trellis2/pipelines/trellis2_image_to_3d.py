@@ -1,4 +1,6 @@
 from typing import *
+from contextlib import contextmanager
+import sys
 import gc
 import torch
 import torch.nn as nn
@@ -6,7 +8,7 @@ import numpy as np
 from PIL import Image
 from .base import Pipeline
 from . import samplers, rembg
-from ..modules.sparse import SparseTensor
+from ..modules.sparse import SparseTensor, sparse_unbind, sparse_cat
 from ..modules import image_feature_extractor
 from ..representations import Mesh, MeshWithVoxel
 
@@ -72,7 +74,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def from_pretrained(
         path: str,
         models_to_load: list = None,
-        enable_disk_offload: bool = False
+        enable_disk_offload: bool = False,
+        enable_gguf: bool = False,
+        gguf_quant: str = "Q8_0",
+        enable_fp8: bool = False,
     ) -> "Trellis2ImageTo3DPipeline":
         """
         Load a pretrained model.
@@ -81,13 +86,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             path (str): The path to the model. Can be either local path or a Hugging Face repository.
             models_to_load: Optional list of model keys to load. If None, loads all models.
             enable_disk_offload: If True, enables disk-based model offloading for zero RAM usage.
+            enable_gguf: Whether to use GGUF models.
+            gguf_quant: GGUF quantization level.
+            enable_fp8: Whether to use FP8 scaled safetensors.
         """
         pipeline = super(Trellis2ImageTo3DPipeline, Trellis2ImageTo3DPipeline).from_pretrained(
-            path, models_to_load, enable_disk_offload=enable_disk_offload
+            path, models_to_load, enable_disk_offload=enable_disk_offload,
+            enable_gguf=enable_gguf, gguf_quant=gguf_quant, enable_fp8=enable_fp8
         )
         new_pipeline = Trellis2ImageTo3DPipeline()
         new_pipeline.__dict__ = pipeline.__dict__
         args = pipeline._pretrained_args
+        print(f"[TRELLIS2-DEBUG] Trellis2ImageTo3DPipeline.from_pretrained: Assembling pipeline components", file=sys.stderr, flush=True)
 
         new_pipeline.sparse_structure_sampler = getattr(samplers, args['sparse_structure_sampler']['name'])(**args['sparse_structure_sampler']['args'])
         new_pipeline.sparse_structure_sampler_params = args['sparse_structure_sampler']['params']
@@ -342,13 +352,22 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
 
-        # Upsample
+        # Upsample with batch-wise and spatial chunking if necessary
         decoder = self._load_model('shape_slat_decoder')
         decoder.low_vram = not self.keep_model_loaded
-        hr_coords = decoder.upsample(slat, upsample_times=4)
+        
+        slats = sparse_unbind(slat, dim=0)
+        hr_coords_list = []
+        for s in slats:
+            if s.feats.shape[0] > 10000: # Lower threshold for upsample
+                hc = self._spatial_chunked_call(decoder.upsample, s, upsample_times=4)
+            else:
+                hc = decoder.upsample(s, upsample_times=4)
+            hr_coords_list.append(hc)
+        hr_coords = torch.cat(hr_coords_list, dim=0)
 
         # Free LR slat and decoder - not used in HR pass
-        del slat, std, mean, decoder
+        del slats, slat, std, mean, decoder
         self._unload_model('shape_slat_decoder')
 
         hr_resolution = resolution
@@ -418,6 +437,208 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         slat = slat * std + mean
 
         return slat, hr_resolution
+    def _spatial_chunked_call(
+        self,
+        func: Callable,
+        x: SparseTensor,
+        padding: int = 2,
+        **kwargs
+    ) -> Any:
+        """
+        Call a function on a SparseTensor in spatial chunks to save VRAM.
+        
+        Args:
+            func (Callable): The function to call.
+            x (SparseTensor): The input sparse tensor (assumed batch_size=1).
+            padding (int): The overlap padding between chunks.
+            **kwargs: Additional arguments for the function.
+        """
+        coords = x.coords
+        # Spatial coordinates are in columns 1, 2, 3
+        spatial_coords = coords[:, 1:]
+        
+        # Determine split point (center of the grid)
+        res = x.spatial_shape
+        mid = [r // 2 for r in res]
+        
+        # 8 octants
+        chunk_results = []
+        
+        for i in range(8):
+            bx = (i >> 2) & 1
+            by = (i >> 1) & 1
+            bz = i & 1
+            
+            x_min = 0 if bx == 0 else mid[0]
+            x_max = mid[0] if bx == 0 else res[0]
+            y_min = 0 if by == 0 else mid[1]
+            y_max = mid[1] if by == 0 else res[1]
+            z_min = 0 if bz == 0 else mid[2]
+            z_max = mid[2] if bz == 0 else res[2]
+            
+            # Filter voxels for this octant WITH padding
+            mask_padded = (
+                (spatial_coords[:, 0] >= x_min - padding) & (spatial_coords[:, 0] < x_max + padding) &
+                (spatial_coords[:, 1] >= y_min - padding) & (spatial_coords[:, 1] < y_max + padding) &
+                (spatial_coords[:, 2] >= z_min - padding) & (spatial_coords[:, 2] < z_max + padding)
+            )
+            
+            if not mask_padded.any():
+                chunk_results.append(None)
+                continue
+                
+            # Extract chunk
+            chunk_x = SparseTensor(
+                feats=x.feats[mask_padded],
+                coords=coords[mask_padded],
+                shape=x.shape,
+                scale=x._scale
+            )
+            
+            # Chunk kwargs if they are SparseTensors
+            chunk_kwargs = {}
+            for k, v in kwargs.items():
+                if isinstance(v, SparseTensor):
+                    sc = v.coords[:, 1:]
+                    # Scale boundaries for this SparseTensor
+                    sf = v.spatial_shape[0] / res[0]
+                    m = (
+                        (sc[:, 0] >= (x_min - padding) * sf) & (sc[:, 0] < (x_max + padding) * sf) &
+                        (sc[:, 1] >= (y_min - padding) * sf) & (sc[:, 1] < (y_max + padding) * sf) &
+                        (sc[:, 2] >= (z_min - padding) * sf) & (sc[:, 2] < (z_max + padding) * sf)
+                    )
+                    chunk_kwargs[k] = SparseTensor(feats=v.feats[m], coords=v.coords[m], shape=v.shape, scale=v._scale)
+                elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], SparseTensor):
+                    # List of SparseTensors (e.g. guide_subs)
+                    cv_list = []
+                    for cv in v:
+                        sc = cv.coords[:, 1:]
+                        sf = cv.spatial_shape[0] / res[0]
+                        m = (
+                            (sc[:, 0] >= (x_min - padding) * sf) & (sc[:, 0] < (x_max + padding) * sf) &
+                            (sc[:, 1] >= (y_min - padding) * sf) & (sc[:, 1] < (y_max + padding) * sf) &
+                            (sc[:, 2] >= (z_min - padding) * sf) & (sc[:, 2] < (z_max + padding) * sf)
+                        )
+                        cv_list.append(SparseTensor(feats=cv.feats[m], coords=cv.coords[m], shape=cv.shape, scale=cv._scale))
+                    chunk_kwargs[k] = cv_list
+                else:
+                    chunk_kwargs[k] = v
+            
+            # Call function
+            res_chunk = func(chunk_x, **chunk_kwargs)
+            
+            # Crop result back to original octant boundaries (no padding)
+            if isinstance(res_chunk, SparseTensor):
+                c = res_chunk.coords[:, 1:]
+                mask_crop = (
+                    (c[:, 0] >= x_min) & (c[:, 0] < x_max) &
+                    (c[:, 1] >= y_min) & (c[:, 1] < y_max) &
+                    (c[:, 2] >= z_min) & (c[:, 2] < z_max)
+                )
+                res_chunk = SparseTensor(
+                    feats=res_chunk.feats[mask_crop],
+                    coords=res_chunk.coords[mask_crop],
+                    shape=res_chunk.shape,
+                    scale=res_chunk._scale
+                )
+            elif isinstance(res_chunk, tuple):
+                # Handle (SparseTensor, List[SparseTensor]) OR (List[Mesh], List[SparseTensor])
+                h_chunk, subs_chunk = res_chunk
+                if isinstance(h_chunk, SparseTensor):
+                    c = h_chunk.coords[:, 1:]
+                    mask_crop = (
+                        (c[:, 0] >= x_min) & (c[:, 0] < x_max) &
+                        (c[:, 1] >= y_min) & (c[:, 1] < y_max) &
+                        (c[:, 2] >= z_min) & (c[:, 2] < z_max)
+                    )
+                    h_chunk = SparseTensor(
+                        feats=h_chunk.feats[mask_crop],
+                        coords=h_chunk.coords[mask_crop],
+                        shape=h_chunk.shape,
+                        scale=h_chunk._scale
+                    )
+                elif isinstance(h_chunk, list) and len(h_chunk) > 0 and hasattr(h_chunk[0], 'vertices'):
+                    # List[Mesh] - we don't crop individual meshes yet, just collect them
+                    pass
+                
+                # Crop subs
+                cropped_subs = []
+                for sub in subs_chunk:
+                    sc = sub.coords[:, 1:]
+                    sf = sub.spatial_shape[0] / res[0]
+                    s_mask = (
+                        (sc[:, 0] >= x_min * sf) & (sc[:, 0] < x_max * sf) &
+                        (sc[:, 1] >= y_min * sf) & (sc[:, 1] < y_max * sf) &
+                        (sc[:, 2] >= z_min * sf) & (sc[:, 2] < z_max * sf)
+                    )
+                    cropped_subs.append(SparseTensor(feats=sub.feats[s_mask], coords=sub.coords[s_mask], shape=sub.shape, scale=sub._scale))
+                res_chunk = (h_chunk, cropped_subs)
+            elif isinstance(res_chunk, torch.Tensor):
+                c = res_chunk[:, 1:]
+                mask_crop = (
+                    (c[:, 0] >= x_min) & (c[:, 0] < x_max) &
+                    (c[:, 1] >= y_min) & (c[:, 1] < y_max) &
+                    (c[:, 2] >= z_min) & (c[:, 2] < z_max)
+                )
+                res_chunk = res_chunk[mask_crop]
+                
+            chunk_results.append(res_chunk)
+            torch.cuda.empty_cache()
+            
+        valid_results = [r for r in chunk_results if r is not None]
+        if not valid_results: return None
+            
+        if isinstance(valid_results[0], SparseTensor):
+            # Custom merge for spatial chunks (preserve batch indices)
+            merged_feats = torch.cat([r.feats for r in valid_results], dim=0)
+            merged_coords = torch.cat([r.coords for r in valid_results], dim=0)
+            return SparseTensor(
+                feats=merged_feats, 
+                coords=merged_coords, 
+                shape=valid_results[0].shape, 
+                scale=valid_results[0]._scale
+            )
+        elif isinstance(valid_results[0], tuple):
+            # Merge (h, subs)
+            h_list = [r[0] for r in valid_results]
+            if isinstance(h_list[0], SparseTensor):
+                merged_h_feats = torch.cat([r.feats for r in h_list], dim=0)
+                merged_h_coords = torch.cat([r.coords for r in h_list], dim=0)
+                merged_h = SparseTensor(
+                    feats=merged_h_feats, 
+                    coords=merged_h_coords, 
+                    shape=h_list[0].shape, 
+                    scale=h_list[0]._scale
+                )
+            elif isinstance(h_list[0], list):
+                # Merge List[List[Mesh]] -> List[Mesh]
+                # Since batch_size=1, each chunk returns [Mesh]
+                all_v, all_f = [], []
+                v_off = 0
+                for ml in h_list:
+                    for m in ml:
+                        # Move to CPU immediately to save VRAM during merging
+                        all_v.append(m.vertices.cpu())
+                        all_f.append(m.faces.cpu() + v_off)
+                        v_off += m.vertices.shape[0]
+                merged_h = [Mesh(torch.cat(all_v, dim=0), torch.cat(all_f, dim=0))]
+            
+            num_levels = len(valid_results[0][1])
+            merged_subs = []
+            for level in range(num_levels):
+                level_subs = [r[1][level] for r in valid_results]
+                merged_sub_feats = torch.cat([r.feats for r in level_subs], dim=0)
+                merged_sub_coords = torch.cat([r.coords for r in level_subs], dim=0)
+                merged_subs.append(SparseTensor(
+                    feats=merged_sub_feats, 
+                    coords=merged_sub_coords, 
+                    shape=level_subs[0].shape, 
+                    scale=level_subs[0]._scale
+                ))
+            return merged_h, merged_subs
+        elif isinstance(valid_results[0], torch.Tensor):
+            return torch.cat(valid_results, dim=0)
+        return valid_results
 
     def decode_shape_slat(
         self,
@@ -435,13 +656,73 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             List[Mesh]: The decoded meshes.
             List[SparseTensor]: The decoded substructures.
         """
+        # Aggressive cleanup before loading decoder
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         decoder = self._load_model('shape_slat_decoder')
         decoder.set_resolution(resolution)
         decoder.low_vram = not self.keep_model_loaded
-        ret = decoder(slat, return_subs=True)
+        
+        # Batch-wise decoding to save VRAM
+        slats = sparse_unbind(slat, dim=0)
+        all_meshes = []
+        all_subs = []
+        
+        for i, s in enumerate(slats):
+            # Clear cache before each batch
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+            # Decode single batch with spatial chunking if necessary
+            # We use a threshold of 10k voxels to trigger spatial chunking for high-res
+            if s.feats.shape[0] > 10000:
+                print(f"[TRELLIS2-DEBUG] High density detected ({s.feats.shape[0]} voxels), using spatial chunking", file=sys.stderr)
+                res = self._spatial_chunked_call(decoder, s, return_subs=True)
+            else:
+                res = decoder(s, return_subs=True)
+                
+            if isinstance(res, tuple):
+                h, subs = res
+            else:
+                h, subs = res, []
+            
+            # Extract meshes from h
+            # flexible_dual_grid_to_mesh is called inside decoder.forward in fdg_vae.py
+            # But wait, our decoder.forward returns meshes if training=False
+            # Let's check fdg_vae.py again.
+            
+            # Actually, FlexiDualGridVaeDecoder.forward returns meshes when not training.
+            # So res is already List[Mesh] or (List[Mesh], List[SparseTensor])
+            if isinstance(res, tuple):
+                meshes, subs = res
+            else:
+                meshes, subs = res, []
+            
+            # Move meshes and subs to CPU to save VRAM
+            all_meshes.extend([m.cpu() for m in meshes])
+            all_subs.append([s.cpu() for s in subs])
+            
+            # Cleanup
+            del meshes, subs, res, s
+            gc.collect()
+            torch.cuda.empty_cache()
+            
         del decoder
         self._unload_model('shape_slat_decoder')
-        return ret
+        
+        # Merge substructures if they exist
+        if all_subs and all_subs[0]:
+            # all_subs is List[List[SparseTensor]]
+            # We need to cat each level of substructures
+            num_levels = len(all_subs[0])
+            merged_subs = []
+            for level in range(num_levels):
+                level_subs = [s[level] for s in all_subs]
+                merged_subs.append(sparse_cat(level_subs, dim=0))
+            return all_meshes, merged_subs
+        
+        return all_meshes, []
     
     def sample_tex_slat(
         self,
@@ -503,10 +784,41 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         """
         decoder = self._load_model('tex_slat_decoder')
         decoder.low_vram = not self.keep_model_loaded
-        ret = decoder(slat, guide_subs=subs) * 0.5 + 0.5
+        
+        # Batch-wise decoding to save VRAM
+        slats = sparse_unbind(slat, dim=0)
+        # subs is List[SparseTensor], where each SparseTensor is batched
+        # We need to unbind each guide sub as well
+        unbound_subs = [sparse_unbind(sub, dim=0) for sub in subs]
+        
+        all_decoded = []
+        for i, s in enumerate(slats):
+            # Clear cache before each batch
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+            # Get guide subs for this batch
+            curr_subs = [us[i] for us in unbound_subs]
+            
+            # Decode single batch with spatial chunking if necessary
+            if s.feats.shape[0] > 10000:
+                print(f"[TRELLIS2-DEBUG] High density detected ({s.feats.shape[0]} voxels), using spatial chunking", file=sys.stderr)
+                decoded = self._spatial_chunked_call(decoder, s, guide_subs=curr_subs) * 0.5 + 0.5
+            else:
+                decoded = decoder(s, guide_subs=curr_subs) * 0.5 + 0.5
+            # Move to CPU to save VRAM
+            all_decoded.append(decoded.cpu())
+            
+            # Cleanup
+            del decoded, s, curr_subs
+            gc.collect()
+            torch.cuda.empty_cache()
+            
         del decoder
         self._unload_model('tex_slat_decoder')
-        return ret
+        
+        # Merge results
+        return sparse_cat(all_decoded, dim=0)
     
     @torch.no_grad()
     def decode_latent(
@@ -885,3 +1197,249 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             return out_mesh, (shape_slat, tex_slat, res)
         else:
             return out_mesh
+
+    # ==========================================================================
+    # MULTI-IMAGE CONDITIONING (ported from TRELLIS v1)
+    # ==========================================================================
+
+    @contextmanager
+    def inject_sampler_multi_image(
+        self,
+        sampler_name: str,
+        num_images: int,
+        num_steps: int,
+        mode: Literal['stochastic', 'multidiffusion'] = 'stochastic',
+    ):
+        """
+        Inject a sampler with multiple images as condition.
+
+        Args:
+            sampler_name (str): The name of the sampler to inject (e.g., 'sparse_structure_sampler').
+            num_images (int): The number of images to condition on.
+            num_steps (int): The number of steps to run the sampler for.
+            mode (str): 'stochastic' cycles through images per step, 'multidiffusion' averages predictions.
+        """
+        sampler = getattr(self, sampler_name)
+        setattr(sampler, '_old_inference_model', sampler._inference_model)
+
+        # Sampler-specific kwargs that should NOT be passed to model
+        SAMPLER_KWARGS = {'neg_cond', 'guidance_strength', 'guidance_interval', 'guidance_rescale'}
+
+        if mode == 'stochastic':
+            if num_images > num_steps:
+                print(f"\033[93mWarning: number of conditioning images ({num_images}) is greater than "
+                      f"number of steps ({num_steps}) for {sampler_name}. This may lead to some images "
+                      f"not being used.\033[0m", file=sys.stderr)
+
+            # Create index list that cycles through images
+            cond_indices = (np.arange(num_steps) % num_images).tolist()
+
+            def _new_inference_model(self, model, x_t, t, cond, **kwargs):
+                cond_idx = cond_indices.pop(0)
+                cond_i = cond[cond_idx]
+                # Filter out sampler-specific kwargs only if they are NOT expected by the old method
+                # This ensures mixins still get their arguments while the base model doesn't
+                import inspect
+                sig = inspect.signature(self._old_inference_model)
+                model_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or k not in SAMPLER_KWARGS}
+                return self._old_inference_model(model, x_t, t, cond=cond_i, **model_kwargs)
+
+        elif mode == 'multidiffusion':
+            from .samplers import FlowEulerSampler
+
+            def _new_inference_model(self, model, x_t, t, cond, neg_cond, guidance_strength, **kwargs):
+                # Filter out sampler-specific kwargs before passing to model
+                model_kwargs = {k: v for k, v in kwargs.items() if k not in SAMPLER_KWARGS}
+                
+                # Run model for each conditioning image and average predictions
+                preds = []
+                for i in range(len(cond)):
+                    pred = FlowEulerSampler._inference_model(self, model, x_t, t, cond[i], **model_kwargs)
+                    preds.append(pred)
+                pred = sum(preds) / len(preds)
+
+                # Apply CFG with negative conditioning
+                neg_pred = FlowEulerSampler._inference_model(self, model, x_t, t, neg_cond, **model_kwargs)
+                return (1 + guidance_strength) * pred - guidance_strength * neg_pred
+
+        else:
+            raise ValueError(f"Unsupported mode: {mode}. Use 'stochastic' or 'multidiffusion'.")
+
+        sampler._inference_model = _new_inference_model.__get__(sampler, type(sampler))
+
+        try:
+            yield
+        finally:
+            sampler._inference_model = sampler._old_inference_model
+            delattr(sampler, '_old_inference_model')
+
+    @torch.no_grad()
+    def run_multi_image_shape(
+        self,
+        cond: dict,
+        num_samples: int = 1,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        shape_slat_sampler_params: dict = {},
+        pipeline_type: Optional[str] = None,
+        max_num_tokens: int = 49152,
+        mode: Literal['stochastic', 'multidiffusion'] = 'stochastic',
+    ) -> Tuple[List[Mesh], SparseTensor, int]:
+        """
+        Run shape generation with multiple images as condition.
+
+        Args:
+            cond (dict): The conditioning dict with 'cond_512' [N, B, D], 'cond_1024' [N, B, D], 'neg_cond' [1, B, D].
+            num_samples (int): The number of samples to generate.
+            seed (int): The random seed.
+            sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
+            shape_slat_sampler_params (dict): Additional parameters for the shape SLat sampler.
+            pipeline_type (str): The type of the pipeline.
+            max_num_tokens (int): The maximum number of tokens to use.
+            mode (str): 'stochastic' or 'multidiffusion'.
+
+        Returns:
+            Tuple of (meshes, shape_slat, subs, resolution)
+        """
+        pipeline_type = pipeline_type or self.default_pipeline_type
+
+        # Get number of images from conditioning
+        num_images = cond['cond_512'].shape[0]
+        print(f"[TRELLIS2] Multi-image shape generation with {num_images} images, mode={mode}", file=sys.stderr)
+
+        # Extract conditioning - keep as [N, B, D] for multi-image
+        # Use resolution-specific negative conditioning
+        cond_512 = {'cond': cond['cond_512'], 'neg_cond': cond['neg_cond_512']}
+        cond_1024 = {'cond': cond['cond_1024'], 'neg_cond': cond['neg_cond_1024']} if 'cond_1024' in cond else None
+
+        torch.manual_seed(seed)
+        ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
+        ss_steps = {**self.sparse_structure_sampler_params, **sparse_structure_sampler_params}.get('steps', 12)
+
+        # Sample sparse structure with multi-image injection
+        with self.inject_sampler_multi_image('sparse_structure_sampler', num_images, ss_steps, mode=mode):
+            coords = self.sample_sparse_structure(
+                cond_512, ss_res,
+                num_samples, sparse_structure_sampler_params
+            )
+
+        shape_steps = {**self.shape_slat_sampler_params, **shape_slat_sampler_params}.get('steps', 12)
+
+        if pipeline_type == '512':
+            with self.inject_sampler_multi_image('shape_slat_sampler', num_images, shape_steps, mode=mode):
+                shape_slat = self.sample_shape_slat(
+                    cond_512, 'shape_slat_flow_model_512',
+                    coords, shape_slat_sampler_params
+                )
+            res = 512
+        elif pipeline_type == '1024':
+            with self.inject_sampler_multi_image('shape_slat_sampler', num_images, shape_steps, mode=mode):
+                shape_slat = self.sample_shape_slat(
+                    cond_1024, 'shape_slat_flow_model_1024',
+                    coords, shape_slat_sampler_params
+                )
+            res = 1024
+        elif pipeline_type in ('1024_cascade', '1536_cascade'):
+            target_res = 1024 if pipeline_type == '1024_cascade' else 1536
+            # For cascade, inject both LR and HR passes
+            with self.inject_sampler_multi_image('shape_slat_sampler', num_images, shape_steps, mode=mode):
+                shape_slat, res = self.sample_shape_slat_cascade(
+                    cond_512, cond_1024,
+                    'shape_slat_flow_model_512', 'shape_slat_flow_model_1024',
+                    512, target_res,
+                    coords, shape_slat_sampler_params,
+                    max_num_tokens
+                )
+        else:
+            raise ValueError(f"Invalid pipeline type: {pipeline_type}")
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Decode shape
+        meshes, subs = self.decode_shape_slat(shape_slat, res)
+
+        torch.cuda.empty_cache()
+        return meshes, shape_slat, subs, res
+
+    @torch.no_grad()
+    def run_multi_image_texture(
+        self,
+        cond: dict,
+        shape_slat: SparseTensor,
+        subs: List[SparseTensor],
+        meshes: List[Mesh],
+        resolution: int,
+        seed: int = 42,
+        tex_slat_sampler_params: dict = {},
+        pipeline_type: Optional[str] = None,
+        mode: Literal['stochastic', 'multidiffusion'] = 'stochastic',
+    ) -> List[MeshWithVoxel]:
+        """
+        Run texture generation with multiple images as condition.
+
+        Args:
+            cond (dict): The conditioning dict with 'cond_512' [N, B, D], 'cond_1024' [N, B, D], 'neg_cond' [1, B, D].
+            shape_slat (SparseTensor): The shape latent from run_multi_image_shape().
+            subs (List[SparseTensor]): The substructures from run_multi_image_shape().
+            meshes (List[Mesh]): The meshes from run_multi_image_shape().
+            resolution (int): The resolution from run_multi_image_shape().
+            seed (int): The random seed.
+            tex_slat_sampler_params (dict): Additional parameters for the texture SLat sampler.
+            pipeline_type (str): The type of the pipeline.
+            mode (str): 'stochastic' or 'multidiffusion'.
+
+        Returns:
+            List of MeshWithVoxel with PBR attributes.
+        """
+        pipeline_type = pipeline_type or self.default_pipeline_type
+
+        # Get number of images from conditioning
+        num_images = cond['cond_512'].shape[0]
+        print(f"[TRELLIS2] Multi-image texture generation with {num_images} images, mode={mode}", file=sys.stderr)
+
+        # Validate texture models
+        if pipeline_type == '512':
+            tex_model_key = 'tex_slat_flow_model_512'
+            tex_cond = {'cond': cond['cond_512'], 'neg_cond': cond['neg_cond_512']}
+        else:
+            tex_model_key = 'tex_slat_flow_model_1024'
+            tex_cond = {'cond': cond['cond_1024'], 'neg_cond': cond['neg_cond_1024']}
+
+        torch.manual_seed(seed)
+        tex_steps = {**self.tex_slat_sampler_params, **tex_slat_sampler_params}.get('steps', 12)
+
+        # Sample texture latent with multi-image injection
+        with self.inject_sampler_multi_image('tex_slat_sampler', num_images, tex_steps, mode=mode):
+            tex_slat = self.sample_tex_slat(
+                tex_cond, tex_model_key,
+                shape_slat, tex_slat_sampler_params
+            )
+
+        del shape_slat, tex_cond
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Decode texture using pre-computed subs
+        tex_voxels = self.decode_tex_slat(tex_slat, subs)
+
+        del tex_slat
+        torch.cuda.empty_cache()
+
+        # Combine meshes with texture voxels
+        out_mesh = []
+        for m, v in zip(meshes, tex_voxels):
+            m.fill_holes()
+            out_mesh.append(
+                MeshWithVoxel(
+                    m.vertices, m.faces,
+                    origin=[-0.5, -0.5, -0.5],
+                    voxel_size=1 / resolution,
+                    coords=v.coords[:, 1:],
+                    attrs=v.feats,
+                    voxel_shape=torch.Size([*v.shape, *v.spatial_shape]),
+                    layout=self.pbr_attr_layout
+                )
+            )
+        return out_mesh
+

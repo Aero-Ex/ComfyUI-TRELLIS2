@@ -15,6 +15,9 @@ ATTN_BACKENDS = ['flash_attn', 'xformers', 'sdpa', 'sageattn']
 # VRAM usage modes
 VRAM_MODES = ['keep_loaded', 'cpu_offload', 'disk_offload']
 
+# GGUF Quantization levels
+GGUF_QUANTS = ['Q4_K_S', 'Q4_K_M', 'Q5_K_S', 'Q5_K_M', 'Q6_K', 'Q8_0']
+
 
 class LoadTrellis2Models:
     """Load TRELLIS.2 models for 3D generation."""
@@ -24,6 +27,9 @@ class LoadTrellis2Models:
         return {
             "required": {
                 "resolution": (RESOLUTION_MODES, {"default": '1024_cascade'}),
+                "enable_gguf": ("BOOLEAN", {"default": False}),
+                "gguf_quant": (GGUF_QUANTS, {"default": "Q8_0"}),
+                "enable_fp8": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "attn_backend": (ATTN_BACKENDS, {"default": "flash_attn"}),
@@ -58,7 +64,8 @@ VRAM mode:
 - disk_offload: Delete unused models, reload from disk (~3GB VRAM & CPU RAM, ~2-3x slower)
 """
 
-    def load_models(self, resolution='1024_cascade', attn_backend="flash_attn", vram_mode="keep_loaded"):
+    def load_models(self, resolution='1024_cascade', attn_backend="flash_attn", vram_mode="keep_loaded", enable_gguf=False, gguf_quant="Q8_0", enable_fp8=False):
+        print(f"[TRELLIS2-DEBUG] LoadTrellis2Models.load_models: resolution={resolution}, attn_backend={attn_backend}, vram_mode={vram_mode}, enable_gguf={enable_gguf}, gguf_quant={gguf_quant}, enable_fp8={enable_fp8}")
         # Create lightweight config object
         # Actual model loading happens in @isolated subprocess methods
         config = Trellis2ModelConfig(
@@ -66,6 +73,9 @@ VRAM mode:
             resolution=resolution,
             attn_backend=attn_backend,
             vram_mode=vram_mode,
+            enable_gguf=enable_gguf,
+            gguf_quant=gguf_quant,
+            enable_fp8=enable_fp8,
         )
         return (config,)
 

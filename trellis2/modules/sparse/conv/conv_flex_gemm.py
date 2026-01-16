@@ -38,17 +38,76 @@ def sparse_conv3d_forward(self, x: SparseTensor) -> SparseTensor:
     flex_gemm.ops.spconv.set_algorithm(config.FLEX_GEMM_ALGO)
     flex_gemm.ops.spconv.set_hashmap_ratio(config.FLEX_GEMM_HASHMAP_RATIO)
 
+    # Handle GGUF weights
+    if self.is_ggml_quantized():
+        weight, bias = self.cast_bias_weight(x)
+        # GGUF weights are typically loaded in their original layout (Co, Ci, Kd, Kh, Kw).
+        # We need to permute them to (Co, Kd, Kh, Kw, Ci) for flex_gemm.
+        if weight.shape != self.weight.shape:
+             weight = weight.permute(0, 2, 3, 4, 1).contiguous()
+    else:
+        weight, bias = self.weight, self.bias
+        if x.feats.dtype != weight.dtype:
+            x = x.replace(x.feats.to(weight.dtype))
+
     # check if neighbor map is already computed
-    Co, Kd, Kh, Kw, Ci = self.weight.shape
+    Co, Kd, Kh, Kw, Ci = weight.shape
     neighbor_cache_key = f'SubMConv3d_neighbor_cache_{Kw}x{Kh}x{Kd}_dilation{self.dilation}'
     neighbor_cache = x.get_spatial_cache(neighbor_cache_key)
-    
+
+    if getattr(self, 'low_vram', False):
+        # Manual chunked explicit GEMM to save memory
+        chunk_size = getattr(self, 'chunk_size', 65536)
+        N = x.feats.shape[0]
+        V = Kd * Kh * Kw
+        
+        # Ensure neighbor cache is computed
+        if neighbor_cache is None:
+            from flex_gemm.ops.spconv.submanifold_conv3d import SubMConv3dFunction
+            neighbor_cache = SubMConv3dFunction._compute_neighbor_cache(
+                x.coords, torch.Size([*x.shape, *x.spatial_shape]), (Kw, Kh, Kd), self.dilation
+            )
+            x.register_spatial_cache(neighbor_cache_key, neighbor_cache)
+        
+        neighbor_map = neighbor_cache['neighbor_map']
+        
+        # VRAM Monitoring
+        import sys
+        print(f"[TRELLIS2-DEBUG] SparseConv3d Allocation: N={N}, Co={Co}, V={V}, Ci={Ci}, dtype={x.feats.dtype}", file=sys.stderr)
+        
+        out = torch.empty((N, Co), device=x.feats.device, dtype=x.feats.dtype)
+        weight_flat = weight.reshape(Co, V * Ci).t()
+        
+        for i in range(0, N, chunk_size):
+            end = min(i + chunk_size, N)
+            curr_chunk_size = end - i
+            
+            # im2col for this chunk
+            chunk_neighbor_map = neighbor_map[i:end].view(-1)
+            chunk_im2col = torch.zeros((curr_chunk_size * V, Ci), device=x.feats.device, dtype=x.feats.dtype)
+            mask = chunk_neighbor_map != 0xffffffff
+            if mask.any():
+                # Cast to long before indexing with mask to avoid "index_cuda" not implemented for 'UInt32'
+                chunk_im2col[mask] = x.feats[chunk_neighbor_map.long()[mask]]
+            chunk_im2col = chunk_im2col.view(curr_chunk_size, V * Ci)
+            
+            # GEMM
+            if bias is not None:
+                torch.addmm(bias, chunk_im2col, weight_flat, out=out[i:end])
+            else:
+                torch.mm(chunk_im2col, weight_flat, out=out[i:end])
+            
+            del chunk_im2col, mask, chunk_neighbor_map
+        
+        out = x.replace(out)
+        return out
+
     out, neighbor_cache_ = sparse_submanifold_conv3d(
         x.feats,
         x.coords,
         torch.Size([*x.shape, *x.spatial_shape]),
-        self.weight,
-        self.bias,
+        weight,
+        bias,
         neighbor_cache,
         self.dilation
     )

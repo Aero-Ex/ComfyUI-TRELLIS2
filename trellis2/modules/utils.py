@@ -65,12 +65,27 @@ def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
+def _apply_in_chunks(module: nn.Module, x: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    """
+    Apply a module to a tensor in chunks to save VRAM.
+    """
+    if chunk_size <= 0 or x.shape[0] <= chunk_size:
+        return module(x)
+
+    outputs = []
+    for start in range(0, x.shape[0], chunk_size):
+        outputs.append(module(x[start : start + chunk_size]))
+    return torch.cat(outputs, dim=0)
+
+
 def manual_cast(tensor, dtype):
     """
     Cast if autocast is not enabled.
     """
     if not torch.is_autocast_enabled():
-        return tensor.type(dtype)
+        if tensor.dtype == dtype:
+            return tensor
+        return tensor.to(dtype)
     return tensor
 
 

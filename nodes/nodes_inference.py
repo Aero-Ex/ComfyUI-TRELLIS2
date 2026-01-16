@@ -61,7 +61,7 @@ Use any background removal node (BiRefNet, rembg, etc.) to generate the mask.
         return (conditioning, preprocessed_image)
 
 
-@isolated(env="trellis2", import_paths=[".", ".."])
+@isolated(env="trellis2", import_paths=[".", ".."], timeout=1800)  # 30 min for slow HR cascade
 class Trellis2ImageToShape:
     """Generate 3D shape from conditioning using TRELLIS.2."""
 
@@ -143,7 +143,7 @@ Returns:
         return (shape_result, tri_mesh)
 
 
-@isolated(env="trellis2", import_paths=[".", ".."])
+@isolated(env="trellis2", import_paths=[".", ".."], timeout=1800)  # 30 min for safety
 class Trellis2ShapeToTexturedMesh:
     """Generate PBR textured mesh from shape using TRELLIS.2."""
 

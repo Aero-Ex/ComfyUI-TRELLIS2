@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from ..attention import MultiHeadAttention
 from ..norm import LayerNorm32
+from ..sparse.linear import SparseLinear
 
 
 class AbsolutePositionEmbedder(nn.Module):
@@ -50,9 +51,9 @@ class FeedForwardNet(nn.Module):
     def __init__(self, channels: int, mlp_ratio: float = 4.0):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(channels, int(channels * mlp_ratio)),
+            SparseLinear(channels, int(channels * mlp_ratio)),
             nn.GELU(approximate="tanh"),
-            nn.Linear(int(channels * mlp_ratio), channels),
+            SparseLinear(int(channels * mlp_ratio), channels),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

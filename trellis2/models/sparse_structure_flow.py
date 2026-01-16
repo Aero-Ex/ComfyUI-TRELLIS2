@@ -7,6 +7,7 @@ import numpy as np
 from ..modules.utils import convert_module_to, manual_cast, str_to_dtype
 from ..modules.transformer import AbsolutePositionEmbedder, ModulatedTransformerCrossBlock
 from ..modules.attention import RotaryPositionEmbedder
+from ..modules.sparse.linear import SparseLinear
 
 
 class TimestepEmbedder(nn.Module):
@@ -16,9 +17,9 @@ class TimestepEmbedder(nn.Module):
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
+            SparseLinear(frequency_embedding_size, hidden_size, bias=True),
             nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size, bias=True),
+            SparseLinear(hidden_size, hidden_size, bias=True),
         )
         self.frequency_embedding_size = frequency_embedding_size
 
@@ -96,7 +97,7 @@ class SparseStructureFlowModel(nn.Module):
         if share_mod:
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(model_channels, 6 * model_channels, bias=True)
+                SparseLinear(model_channels, 6 * model_channels, bias=True)
             )
 
         if pe_mode == "ape":
@@ -115,7 +116,7 @@ class SparseStructureFlowModel(nn.Module):
         if pe_mode != "rope":
             self.rope_phases = None
 
-        self.input_layer = nn.Linear(in_channels, model_channels)
+        self.input_layer = SparseLinear(in_channels, model_channels)
             
         self.blocks = nn.ModuleList([
             ModulatedTransformerCrossBlock(
@@ -134,7 +135,7 @@ class SparseStructureFlowModel(nn.Module):
             for _ in range(num_blocks)
         ])
 
-        self.out_layer = nn.Linear(model_channels, out_channels)
+        self.out_layer = SparseLinear(model_channels, out_channels)
 
         self.initialize_weights()
         self.convert_to(self.dtype)

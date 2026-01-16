@@ -3,19 +3,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from ...modules.utils import convert_module_to_f16, convert_module_to_f32, zero_module
+from ...modules.utils import convert_module_to_f16, convert_module_to_f32, zero_module, _apply_in_chunks
 from ...modules import sparse as sp
 from ...modules.norm import LayerNorm32
 
 
-def _apply_in_chunks(module: nn.Module, x: torch.Tensor, chunk_size: int) -> torch.Tensor:
-    if chunk_size <= 0 or x.shape[0] <= chunk_size:
-        return module(x)
-
-    outputs = []
-    for start in range(0, x.shape[0], chunk_size):
-        outputs.append(module(x[start : start + chunk_size]))
-    return torch.cat(outputs, dim=0)
 
 
 class SparseResBlock3d(nn.Module):
@@ -35,6 +27,8 @@ class SparseResBlock3d(nn.Module):
         self.upsample = upsample
         self.resample_mode = resample_mode
         self.use_checkpoint = use_checkpoint
+        self.low_vram = False
+        self.chunk_size = 65536
         
         assert not (downsample and upsample), "Cannot downsample and upsample at the same time"
 
@@ -78,7 +72,10 @@ class SparseResBlock3d(nn.Module):
         if self.upsample:
             subdiv = self.to_subdiv(x)
         h = x.replace(self.norm1(x.feats))
-        h = h.replace(F.silu(h.feats))
+        if self.low_vram:
+            h = h.replace(_apply_in_chunks(F.silu, h.feats, self.chunk_size))
+        else:
+            h = h.replace(F.silu(h.feats))
         if self.resample_mode == 'spatial2channel':
             h = self.conv1(h)
         h = self._updown(h, subdiv)
@@ -86,7 +83,10 @@ class SparseResBlock3d(nn.Module):
         if self.resample_mode == 'nearest':
             h = self.conv1(h)
         h = h.replace(self.norm2(h.feats))
-        h = h.replace(F.silu(h.feats))
+        if self.low_vram:
+            h = h.replace(_apply_in_chunks(F.silu, h.feats, self.chunk_size))
+        else:
+            h = h.replace(F.silu(h.feats))
         h = self.conv2(h)
         h = h + self.skip_connection(x)
         if self.upsample:
@@ -111,6 +111,8 @@ class SparseResBlockDownsample3d(nn.Module):
         self.channels = channels
         self.out_channels = out_channels or channels
         self.use_checkpoint = use_checkpoint
+        self.low_vram = False
+        self.chunk_size = 65536
         
         self.norm1 = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
         self.norm2 = LayerNorm32(self.out_channels, elementwise_affine=False, eps=1e-6)
@@ -121,12 +123,18 @@ class SparseResBlockDownsample3d(nn.Module):
 
     def _forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
         h = x.replace(self.norm1(x.feats))
-        h = h.replace(F.silu(h.feats))
+        if self.low_vram:
+            h = h.replace(_apply_in_chunks(F.silu, h.feats, self.chunk_size))
+        else:
+            h = h.replace(F.silu(h.feats))
         h = self.updown(h)
         x = self.updown(x)
         h = self.conv1(h)
         h = h.replace(self.norm2(h.feats))
-        h = h.replace(F.silu(h.feats))
+        if self.low_vram:
+            h = h.replace(_apply_in_chunks(F.silu, h.feats, self.chunk_size))
+        else:
+            h = h.replace(F.silu(h.feats))
         h = self.conv2(h)
         h = h + self.skip_connection(x)
         return h
@@ -151,6 +159,8 @@ class SparseResBlockUpsample3d(nn.Module):
         self.out_channels = out_channels or channels
         self.use_checkpoint = use_checkpoint
         self.pred_subdiv = pred_subdiv
+        self.low_vram = False
+        self.chunk_size = 65536
         
         self.norm1 = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
         self.norm2 = LayerNorm32(self.out_channels, elementwise_affine=False, eps=1e-6)
@@ -165,13 +175,19 @@ class SparseResBlockUpsample3d(nn.Module):
         if self.pred_subdiv:
             subdiv = self.to_subdiv(x)
         h = x.replace(self.norm1(x.feats))
-        h = h.replace(F.silu(h.feats))
+        if self.low_vram:
+            h = h.replace(_apply_in_chunks(F.silu, h.feats, self.chunk_size))
+        else:
+            h = h.replace(F.silu(h.feats))
         subdiv_binarized = subdiv.replace(subdiv.feats > 0) if subdiv is not None else None
         h = self.updown(h, subdiv_binarized)
         x = self.updown(x, subdiv_binarized)
         h = self.conv1(h)
         h = h.replace(self.norm2(h.feats))
-        h = h.replace(F.silu(h.feats))
+        if self.low_vram:
+            h = h.replace(_apply_in_chunks(F.silu, h.feats, self.chunk_size))
+        else:
+            h = h.replace(F.silu(h.feats))
         h = self.conv2(h)
         h = h + self.skip_connection(x)
         if self.pred_subdiv:
@@ -197,6 +213,8 @@ class SparseResBlockS2C3d(nn.Module):
         self.channels = channels
         self.out_channels = out_channels or channels
         self.use_checkpoint = use_checkpoint
+        self.low_vram = False
+        self.chunk_size = 65536
         
         self.norm1 = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
         self.norm2 = LayerNorm32(self.out_channels, elementwise_affine=False, eps=1e-6)
@@ -207,12 +225,18 @@ class SparseResBlockS2C3d(nn.Module):
 
     def _forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
         h = x.replace(self.norm1(x.feats))
-        h = h.replace(F.silu(h.feats))
+        if self.low_vram:
+            h = h.replace(_apply_in_chunks(F.silu, h.feats, self.chunk_size))
+        else:
+            h = h.replace(F.silu(h.feats))
         h = self.conv1(h)
         h = self.updown(h)
         x = self.updown(x)
         h = h.replace(self.norm2(h.feats))
-        h = h.replace(F.silu(h.feats))
+        if self.low_vram:
+            h = h.replace(_apply_in_chunks(F.silu, h.feats, self.chunk_size))
+        else:
+            h = h.replace(F.silu(h.feats))
         h = self.conv2(h)
         h = h + self.skip_connection(x)
         return h
@@ -237,6 +261,8 @@ class SparseResBlockC2S3d(nn.Module):
         self.out_channels = out_channels or channels
         self.use_checkpoint = use_checkpoint
         self.pred_subdiv = pred_subdiv
+        self.low_vram = False
+        self.chunk_size = 65536
         
         self.norm1 = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
         self.norm2 = LayerNorm32(self.out_channels, elementwise_affine=False, eps=1e-6)
@@ -251,13 +277,19 @@ class SparseResBlockC2S3d(nn.Module):
         if self.pred_subdiv:
             subdiv = self.to_subdiv(x)
         h = x.replace(self.norm1(x.feats))
-        h = h.replace(F.silu(h.feats))
+        if self.low_vram:
+            h = h.replace(_apply_in_chunks(F.silu, h.feats, self.chunk_size))
+        else:
+            h = h.replace(F.silu(h.feats))
         h = self.conv1(h)
         subdiv_binarized = subdiv.replace(subdiv.feats > 0) if subdiv is not None else None
         h = self.updown(h, subdiv_binarized)
         x = self.updown(x, subdiv_binarized)
         h = h.replace(self.norm2(h.feats))
-        h = h.replace(F.silu(h.feats))
+        if self.low_vram:
+            h = h.replace(_apply_in_chunks(F.silu, h.feats, self.chunk_size))
+        else:
+            h = h.replace(F.silu(h.feats))
         h = self.conv2(h)
         h = h + self.skip_connection(x)
         if self.pred_subdiv:
@@ -522,6 +554,8 @@ class SparseUnetVaeDecoder(nn.Module):
         subs = []
         for i, res in enumerate(self.blocks):
             for j, block in enumerate(res):
+                if self.low_vram:
+                    torch.cuda.empty_cache()
                 if i < len(self.blocks) - 1 and j == len(res) - 1:
                     if self.pred_subdiv:
                         if self.training:
@@ -533,7 +567,12 @@ class SparseUnetVaeDecoder(nn.Module):
                 else:
                     h = block(h)
         h = h.type(x.dtype)
-        h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
+        if self.low_vram:
+            from ..utils import _apply_in_chunks
+            new_feats = _apply_in_chunks(lambda x: F.layer_norm(x, x.shape[-1:]), h.feats)
+            h = h.replace(new_feats)
+        else:
+            h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
         h = self.output_layer(h)
         if self.training and self.pred_subdiv:
             return h, subs_gt, subs

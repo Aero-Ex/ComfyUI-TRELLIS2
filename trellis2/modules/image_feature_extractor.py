@@ -79,15 +79,25 @@ def _find_local_safetensors(cache_dir: str) -> Optional[str]:
     return None
 
 
-def _load_dinov3_from_safetensors(safetensors_path: str) -> DINOv3ViTModel:
+def _load_dinov3_from_safetensors(safetensors_path: str, config_path: str = None) -> DINOv3ViTModel:
     """
     Load DINOv3 ViT-L model from a single safetensors file.
-    Uses embedded config to avoid needing config.json.
+    Uses config.json if provided, otherwise falls back to embedded config.
     """
+    import json
     from safetensors.torch import load_file
 
-    # Create model from embedded config
-    config = DINOv3ViTConfig(**DINOV3_VITL_CONFIG)
+    # Try to load config from JSON file
+    if config_path and os.path.isfile(config_path):
+        print(f"[TRELLIS2] Loading DINOv3 config from: {config_path}", file=sys.stderr, flush=True)
+        with open(config_path, 'r') as f:
+            config_dict = json.load(f)
+        config = DINOv3ViTConfig(**config_dict)
+    else:
+        # Create model from embedded config (fallback)
+        print(f"[TRELLIS2] Using embedded DINOv3 config", file=sys.stderr, flush=True)
+        config = DINOv3ViTConfig(**DINOV3_VITL_CONFIG)
+
     model = DINOv3ViTModel(config)
 
     # Load weights from safetensors
@@ -170,22 +180,39 @@ class DinoV3FeatureExtractor:
         print(f"[TRELLIS2] Checking for local DINOv3 safetensors in: {cache_dir}", file=sys.stderr, flush=True)
         local_safetensors = _find_local_safetensors(cache_dir)
         if local_safetensors:
+            # Look for config.json alongside the safetensors
+            local_config = os.path.join(cache_dir, "config.json")
             print(f"[TRELLIS2] Loading DINOv3 from local safetensors: {local_safetensors}", file=sys.stderr, flush=True)
-            self.model = _load_dinov3_from_safetensors(local_safetensors)
+            self.model = _load_dinov3_from_safetensors(local_safetensors, local_config if os.path.isfile(local_config) else None)
             print(f"[ComfyUI-TRELLIS2] DINOv3 model loaded successfully")
         else:
-            # Priority 2: Use HuggingFace (cache or download)
-            local_files_only = _is_offline_mode() or _is_model_cached(actual_model_name, cache_dir)
-            if local_files_only:
-                print(f"[ComfyUI-TRELLIS2] Loading DINOv3 from HF cache: {actual_model_name}...")
-            else:
-                print(f"[ComfyUI-TRELLIS2] Downloading DINOv3 model: {actual_model_name}...")
-                print(f"[ComfyUI-TRELLIS2] TIP: For cleaner storage, download model.safetensors directly to {cache_dir}/")
-
-            self.model = DINOv3ViTModel.from_pretrained(
-                actual_model_name, cache_dir=cache_dir, local_files_only=local_files_only
-            )
-            print(f"[ComfyUI-TRELLIS2] DINOv3 model loaded successfully")
+            # Priority 2: Check HuggingFace cache structure (models--org--repo/snapshots/...)
+            hf_cache_path = os.path.join(cache_dir, f"models--{actual_model_name.replace('/', '--')}")
+            hf_snapshots = os.path.join(hf_cache_path, "snapshots")
+            found_in_hf_cache = False
+            
+            if os.path.isdir(hf_snapshots):
+                # Find the latest snapshot
+                snapshots = [d for d in os.listdir(hf_snapshots) if os.path.isdir(os.path.join(hf_snapshots, d))]
+                if snapshots:
+                    snapshot_path = os.path.join(hf_snapshots, snapshots[0])
+                    snapshot_safetensors = os.path.join(snapshot_path, "model.safetensors")
+                    snapshot_config = os.path.join(snapshot_path, "config.json")
+                    if os.path.isfile(snapshot_safetensors):
+                        print(f"[TRELLIS2] Loading DINOv3 from HF cache: {snapshot_safetensors}", file=sys.stderr, flush=True)
+                        self.model = _load_dinov3_from_safetensors(snapshot_safetensors, snapshot_config if os.path.isfile(snapshot_config) else None)
+                        print(f"[ComfyUI-TRELLIS2] DINOv3 model loaded successfully")
+                        found_in_hf_cache = True
+            
+            if not found_in_hf_cache:
+                # No local files found - raise error
+                raise FileNotFoundError(
+                    f"[TRELLIS2] DINOv3 model not found locally!\n"
+                    f"  Expected locations:\n"
+                    f"    - {cache_dir}/model.safetensors (preferred)\n"
+                    f"    - {hf_cache_path}/snapshots/*/model.safetensors (HF cache)\n"
+                    f"  Please download the model manually from HuggingFace: {actual_model_name}"
+                )
 
         self.model.eval()
         self.image_size = image_size

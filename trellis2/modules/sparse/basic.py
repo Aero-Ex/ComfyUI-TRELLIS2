@@ -280,6 +280,10 @@ class VarLenTensor:
         if dim is None or 0 in dim:
             return red
 
+        if self.feats.shape[0] == 0:
+            # Short-circuit for empty tensors to avoid segment_reduce crash
+            out_shape = (len(self.layout),) + red.shape[1:]
+            return torch.zeros(out_shape, device=red.device, dtype=red.dtype)
         # segment_reduce may lack CUDA kernel support on some platforms (especially Windows)
         # Try CUDA first, fall back to CPU if kernel is missing
         if red.is_cuda:
@@ -405,8 +409,13 @@ class SparseTensor(VarLenTensor):
             if config.get_conv_backend() == 'torchsparse':
                 self.data = self.SparseTensorData(feats, coords, **kwargs)
             elif config.get_conv_backend() == 'spconv':
-                spatial_shape = list(coords.max(0)[0] + 1)
-                self.data = self.SparseTensorData(feats.reshape(feats.shape[0], -1), coords, spatial_shape[1:], spatial_shape[0], **kwargs)
+                if coords.shape[0] == 0:
+                    spatial_shape = [1, 1, 1]
+                    batch_size = 0
+                else:
+                    spatial_shape = list(coords.max(0)[0] + 1)
+                    batch_size = spatial_shape[0]
+                self.data = self.SparseTensorData(feats.reshape(feats.shape[0], -1), coords, spatial_shape[1:], batch_size, **kwargs)
                 self.data._features = feats
             else:
                 self.data = {
@@ -472,17 +481,24 @@ class SparseTensor(VarLenTensor):
         
     def __cal_shape(self, feats, coords):
         shape = []
-        shape.append(coords[:, 0].max().item() + 1)
+        if coords.shape[0] == 0:
+            shape.append(0)
+        else:
+            shape.append(coords[:, 0].max().item() + 1)
         shape.extend([*feats.shape[1:]])
         return torch.Size(shape)
     
     def __cal_layout(self, coords, batch_size):
+        if coords.shape[0] == 0:
+            return [slice(0, 0) for _ in range(batch_size)]
         seq_len = torch.bincount(coords[:, 0], minlength=batch_size)
         offset = torch.cumsum(seq_len, dim=0) 
         layout = [slice((offset[i] - seq_len[i]).item(), offset[i].item()) for i in range(batch_size)]
         return layout
     
     def __cal_spatial_shape(self, coords):
+        if coords.shape[0] == 0:
+            return torch.Size([1, 1, 1])
         return torch.Size((coords[:, 1:].max(0)[0] + 1).tolist())
     
     @property

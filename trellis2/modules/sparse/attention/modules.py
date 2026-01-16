@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .. import VarLenTensor, SparseTensor
+from ..linear import SparseLinear
+from ....utils.gguf_utils import GGMLLayer, dequantize_tensor
 from .full_attn import sparse_scaled_dot_product_attention
 from .windowed_attn import sparse_windowed_scaled_dot_product_self_attention
 from .rope import SparseRotaryPositionEmbedder
@@ -14,13 +16,31 @@ class SparseMultiHeadRMSNorm(nn.Module):
         self.scale = dim ** 0.5
         self.gamma = nn.Parameter(torch.ones(heads, dim))
 
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        gamma_key = f"{prefix}gamma"
+        if gamma_key in state_dict:
+            gamma = state_dict[gamma_key]
+            if hasattr(gamma, "tensor_type") and gamma.tensor_type not in {None, 0, 1}:
+                self.gamma = nn.Parameter(gamma, requires_grad=False)
+                state_dict.pop(gamma_key)
+        nn.Module._load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
     def forward(self, x: Union[VarLenTensor, torch.Tensor]) -> Union[VarLenTensor, torch.Tensor]:
         x_type = x.dtype
         x = x.float()
+        
+        gamma = self.gamma
+        # Always ensure gamma is a regular tensor, not GGMLTensor
+        # We use dequantize_tensor for all GGML types (including F32/F16) 
+        # because it reliably strips the subclass.
+        is_ggml = hasattr(gamma, "tensor_type") or (hasattr(gamma, "data") and hasattr(gamma.data, "tensor_type"))
+        if is_ggml:
+            gamma = dequantize_tensor(gamma, dtype=x.dtype, device=x.device)
+            
         if isinstance(x, VarLenTensor):
-            x = x.replace(F.normalize(x.feats, dim=-1) * self.gamma * self.scale)
+            x = x.replace(F.normalize(x.feats, dim=-1) * gamma * self.scale)
         else:
-            x = F.normalize(x, dim=-1) * self.gamma * self.scale
+            x = F.normalize(x, dim=-1) * gamma * self.scale
         return x.to(x_type)
 
 
@@ -60,16 +80,16 @@ class SparseMultiHeadAttention(nn.Module):
         self.qk_rms_norm = qk_rms_norm
 
         if self._type == "self":
-            self.to_qkv = nn.Linear(channels, channels * 3, bias=qkv_bias)
+            self.to_qkv = SparseLinear(channels, channels * 3, bias=qkv_bias)
         else:
-            self.to_q = nn.Linear(channels, channels, bias=qkv_bias)
-            self.to_kv = nn.Linear(self.ctx_channels, channels * 2, bias=qkv_bias)
+            self.to_q = SparseLinear(channels, channels, bias=qkv_bias)
+            self.to_kv = SparseLinear(self.ctx_channels, channels * 2, bias=qkv_bias)
         
         if self.qk_rms_norm:
             self.q_rms_norm = SparseMultiHeadRMSNorm(self.head_dim, num_heads)
             self.k_rms_norm = SparseMultiHeadRMSNorm(self.head_dim, num_heads)
             
-        self.to_out = nn.Linear(channels, channels)
+        self.to_out = SparseLinear(channels, channels)
 
         if use_rope:
             self.rope = SparseRotaryPositionEmbedder(self.head_dim, rope_freq=rope_freq)
@@ -86,6 +106,8 @@ class SparseMultiHeadAttention(nn.Module):
         if isinstance(x, VarLenTensor):
             return x.reshape(*shape)
         else:
+            if x.ndim == 2:
+                return x.reshape(x.shape[0], *shape)
             return x.reshape(*x.shape[:2], *shape)
 
     def _fused_pre(self, x: Union[VarLenTensor, torch.Tensor], num_fused: int) -> Union[VarLenTensor, torch.Tensor]:
@@ -93,10 +115,15 @@ class SparseMultiHeadAttention(nn.Module):
             x_feats = x.feats.unsqueeze(0)
         else:
             x_feats = x
-        x_feats = x_feats.reshape(*x_feats.shape[:2], num_fused, self.num_heads, -1)
+        head_dim = x_feats.shape[-1] // (num_fused * self.num_heads)
+        x_feats = x_feats.reshape(*x_feats.shape[:2], num_fused, self.num_heads, head_dim)
         return x.replace(x_feats.squeeze(0)) if isinstance(x, VarLenTensor) else x_feats
     
     def forward(self, x: SparseTensor, context: Optional[Union[VarLenTensor, torch.Tensor]] = None) -> SparseTensor:
+        if x.feats.shape[0] == 0:
+            # Short-circuit for empty sparse tensors to avoid crashes in attention backends
+            return self._linear(self.to_out, x)
+
         if self._type == "self":
             qkv = self._linear(self.to_qkv, x)
             qkv = self._fused_pre(qkv, num_fused=3)
@@ -124,9 +151,11 @@ class SparseMultiHeadAttention(nn.Module):
                     qkv1, self.window_size, shift_window=tuple([self.window_size//2] * 3)
                 )
                 h = qkv.replace(torch.cat([h0.feats, h1.feats], dim=1))
+            if self.attn_mode == "full":
+                h = h # Already set
         else:
             q = self._linear(self.to_q, x)
-            q = self._reshape_chs(q, (self.num_heads, -1))
+            q = self._reshape_chs(q, (self.num_heads, self.head_dim))
             kv = self._linear(self.to_kv, context)
             kv = self._fused_pre(kv, num_fused=2)
             if self.qk_rms_norm:
@@ -136,6 +165,6 @@ class SparseMultiHeadAttention(nn.Module):
                 h = sparse_scaled_dot_product_attention(q, k, v)
             else:
                 h = sparse_scaled_dot_product_attention(q, kv)
-        h = self._reshape_chs(h, (-1,))
+        h = self._reshape_chs(h, (self.channels,))
         h = self._linear(self.to_out, h)
         return h

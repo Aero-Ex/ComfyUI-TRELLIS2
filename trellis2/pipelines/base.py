@@ -41,7 +41,10 @@ class Pipeline:
     def from_pretrained(
         path: str,
         models_to_load: list = None,
-        enable_disk_offload: bool = False
+        enable_disk_offload: bool = False,
+        enable_gguf: bool = False,
+        gguf_quant: str = "Q8_0",
+        enable_fp8: bool = False,
     ) -> "Pipeline":
         """
         Load a pretrained model.
@@ -52,7 +55,12 @@ class Pipeline:
             enable_disk_offload: If True, models are NOT loaded upfront - they're loaded
                                  on-demand when first needed, then unloaded after use.
                                  This enables running on GPUs with limited VRAM.
+            enable_gguf: Enable GGUF quantized model loading.
+            gguf_quant: GGUF quantization type (e.g., Q8_0, Q4_K).
+            enable_fp8: Enable FP8 scaled safetensors loading.
         """
+        print(f"[TRELLIS2-DEBUG] Initializing Pipeline.from_pretrained(path={path}, enable_gguf={enable_gguf}, quant={gguf_quant}, enable_fp8={enable_fp8})", file=sys.stderr, flush=True)
+
         import os
         import json
         import shutil
@@ -107,26 +115,34 @@ class Pipeline:
                 # Relative path, prepend the base repo
                 model_path = f"{path}/{v}"
 
+            print(f"[TRELLIS2-DEBUG]   Processing model item {i}/{total_models}: {k} -> {model_path}", file=sys.stderr, flush=True)
+
             if enable_disk_offload:
                 # PROGRESSIVE LOADING: Don't load model now, just ensure files are cached
                 # and register path for on-demand loading later
-                print(f"[TRELLIS2] Registering model [{i}/{total_models}]: {k}...", file=sys.stderr, flush=True)
-                safetensors_path = Pipeline._ensure_model_cached(model_path, models_dir)
-                disk_offload_manager.register(k, safetensors_path)
+                print(f"[TRELLIS2-DEBUG]   Registering {k} for on-demand loading...", file=sys.stderr, flush=True)
+                weights_path = Pipeline._ensure_model_cached(model_path, models_dir, enable_gguf, gguf_quant)
+                disk_offload_manager.register(k, weights_path)
                 _models[k] = None  # Placeholder - will be loaded on-demand
-                print(f"[TRELLIS2] Registered {k} (will load on-demand)", file=sys.stderr, flush=True)
+                print(f"[TRELLIS2-DEBUG]   Registered {k} (path: {os.path.basename(weights_path)})", file=sys.stderr, flush=True)
             else:
                 # IMMEDIATE LOADING: Load model to GPU now (original behavior)
-                print(f"[TRELLIS2] Loading model [{i}/{total_models}]: {k}...", file=sys.stderr, flush=True)
+                print(f"[TRELLIS2-DEBUG]   Loading {k} to GPU...", file=sys.stderr, flush=True)
                 _models[k] = models.from_pretrained(
                     model_path,
                     disk_offload_manager=disk_offload_manager,
-                    model_key=k
+                    model_key=k,
+                    enable_gguf=enable_gguf,
+                    gguf_quant=gguf_quant,
+                    enable_fp8=enable_fp8,
                 )
-                print(f"[TRELLIS2] Loaded {k} successfully", file=sys.stderr, flush=True)
+                print(f"[TRELLIS2-DEBUG]   Loaded {k} to GPU", file=sys.stderr, flush=True)
 
         new_pipeline = Pipeline(_models, disk_offload_manager=disk_offload_manager)
         new_pipeline._pretrained_args = args
+        new_pipeline.enable_gguf = enable_gguf
+        new_pipeline.gguf_quant = gguf_quant
+        new_pipeline.enable_fp8 = enable_fp8
         if enable_disk_offload:
             print(f"[TRELLIS2] All {total_models} models registered for progressive loading!", file=sys.stderr, flush=True)
         else:
@@ -134,10 +150,10 @@ class Pipeline:
         return new_pipeline
 
     @staticmethod
-    def _ensure_model_cached(model_path: str, models_dir: str) -> str:
+    def _ensure_model_cached(model_path: str, models_dir: str, enable_gguf: bool = False, gguf_quant: str = "Q8_0") -> str:
         """
         Ensure model config and weights are cached locally.
-        Returns the path to the safetensors file.
+        Returns the path to the safetensors or gguf file.
 
         This downloads files if needed but does NOT load them into GPU memory.
         """
@@ -148,36 +164,79 @@ class Pipeline:
         path_parts = model_path.split('/')
 
         # Check if it's a direct local path
-        if os.path.exists(f"{model_path}.json") and os.path.exists(f"{model_path}.safetensors"):
-            return f"{model_path}.safetensors"
+        if os.path.exists(f"{model_path}.json"):
+            if enable_gguf and os.path.exists(f"{model_path}_{gguf_quant}.gguf"):
+                return f"{model_path}_{gguf_quant}.gguf"
+            if enable_gguf and os.path.exists(f"{model_path}.gguf"):
+                return f"{model_path}.gguf"
+            if os.path.exists(f"{model_path}.safetensors"):
+                return f"{model_path}.safetensors"
 
         # HuggingFace path
         repo_id = f'{path_parts[0]}/{path_parts[1]}'
         model_name = '/'.join(path_parts[2:])
+        # Normalize path separators for this OS (Windows uses backslash)
+        model_name = model_name.replace('/', os.sep)
+        quant_model_name = f"{model_name}_{gguf_quant}"
+
 
         local_config = os.path.join(models_dir, f"{model_name}.json")
-        local_weights = os.path.join(models_dir, f"{model_name}.safetensors")
+        local_gguf = os.path.join(models_dir, f"{model_name}.gguf")
+        local_gguf_quant = os.path.join(models_dir, f"{quant_model_name}.gguf")
+        local_safetensors = os.path.join(models_dir, f"{model_name}.safetensors")
+
 
         # Create subdirectories if needed
         os.makedirs(os.path.dirname(local_config), exist_ok=True)
 
-        if os.path.exists(local_config) and os.path.exists(local_weights):
-            # Already cached
-            return local_weights
+        if enable_gguf and os.path.exists(local_gguf_quant):
+            return local_gguf_quant
+        if enable_gguf and os.path.exists(local_gguf):
+            return local_gguf
+
+        if os.path.exists(local_config):
+            if enable_gguf and os.path.exists(local_gguf_quant): return local_gguf_quant
+            if enable_gguf and os.path.exists(local_gguf): return local_gguf
+            if os.path.exists(local_safetensors): return local_safetensors
 
         # Download from HuggingFace
         from huggingface_hub import hf_hub_download
         print(f"[TRELLIS2]   Downloading {model_name} config...", file=sys.stderr, flush=True)
         hf_config = hf_hub_download(repo_id, f"{model_name}.json")
         print(f"[TRELLIS2]   Downloading {model_name} weights (this may take a while)...", file=sys.stderr, flush=True)
-        hf_weights = hf_hub_download(repo_id, f"{model_name}.safetensors")
+
+        # Try to download GGUF first, then safetensors
+        hf_weights = None
+        weights_filename = None
+        if enable_gguf:
+            try:
+                hf_weights = hf_hub_download(repo_id, f"{quant_model_name}.gguf")
+                weights_filename = f"{quant_model_name}.gguf"
+            except Exception:
+                print(f"[TRELLIS2]   {quant_model_name}.gguf not found, trying {model_name}.gguf...", file=sys.stderr, flush=True)
+                try:
+                    hf_weights = hf_hub_download(repo_id, f"{model_name}.gguf")
+                    weights_filename = f"{model_name}.gguf"
+                except Exception:
+                    print(f"[TRELLIS2]   {model_name}.gguf not found, trying {model_name}.safetensors...", file=sys.stderr, flush=True)
+                    hf_weights = hf_hub_download(repo_id, f"{model_name}.safetensors")
+                    weights_filename = f"{model_name}.safetensors"
+        else: # Not enable_gguf, try safetensors first
+            try:
+                hf_weights = hf_hub_download(repo_id, f"{model_name}.safetensors")
+                weights_filename = f"{model_name}.safetensors"
+            except Exception:
+                print(f"[TRELLIS2]   {model_name}.safetensors not found, trying {model_name}.gguf...", file=sys.stderr, flush=True)
+                hf_weights = hf_hub_download(repo_id, f"{model_name}.gguf")
+                weights_filename = f"{model_name}.gguf"
+
 
         # Copy to local models folder
         print(f"[TRELLIS2]   Caching to {models_dir}...", file=sys.stderr, flush=True)
         shutil.copy2(hf_config, local_config)
-        shutil.copy2(hf_weights, local_weights)
+        shutil.copy2(hf_weights, os.path.join(models_dir, weights_filename))
 
-        return local_weights
+        return os.path.join(models_dir, weights_filename)
 
     @property
     def device(self) -> torch.device:
@@ -231,16 +290,37 @@ class Pipeline:
 
         # If model is None, load it from disk (first-time or after unload)
         if model is None and self.disk_offload_manager is not None:
-            safetensors_path = self.disk_offload_manager.get_path(model_key)
-            if safetensors_path:
-                # Config is same path with .json extension
-                config_path = safetensors_path.replace('.safetensors', '')
+            weights_path = self.disk_offload_manager.get_path(model_key)
+            if weights_path:
+                print(f"[TRELLIS2-DEBUG] _load_model({model_key}): Loading from disk cache", file=sys.stderr, flush=True)
+                # Config is same path but with .json (remove .safetensors or .gguf)
+                config_path = weights_path
+                for sfx in ['.safetensors', '.gguf', '_Q8_0', '_Q6_K', '_Q5_K_M', '_Q5_K_S', '_Q4_K_M', '_Q4_K_S']:
+                    config_path = config_path.replace(sfx, '')
+                
+                print(f"[TRELLIS2-DEBUG]   Config path: {config_path}", file=sys.stderr, flush=True)
+                print(f"[TRELLIS2-DEBUG]   Weights path: {weights_path}", file=sys.stderr, flush=True)
+
                 mem_before = torch.cuda.memory_allocated() / 1024**2
                 print(f"[TRELLIS2] Loading {model_key} to {device}... (VRAM before: {mem_before:.0f} MB)", file=sys.stderr, flush=True)
-                model = models.from_pretrained(config_path, device=str(device))
+                # Determine dtype and use_fp16 based on low_vram
+                load_kwargs = {}
+                if self.low_vram:
+                    load_kwargs['use_fp16'] = True
+                    load_kwargs['dtype'] = 'float16'
+
+                model = models.from_pretrained(
+                    config_path, 
+                    device=str(device),
+                    enable_gguf=getattr(self, 'enable_gguf', False),
+                    gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
+                    enable_fp8=getattr(self, 'enable_fp8', False),
+                    **load_kwargs
+                )
                 model.eval()
                 # Apply low_vram setting if enabled
                 if self.low_vram and hasattr(model, 'low_vram'):
+                    print(f"[TRELLIS2-DEBUG]   Enabling low_vram for {model_key}", file=sys.stderr, flush=True)
                     model.low_vram = True
                 self.models[model_key] = model
                 # Enable activation checkpointing for memory reduction (cpu_offload or disk_offload mode)
@@ -253,7 +333,10 @@ class Pipeline:
                 print(f"[TRELLIS2] {model_key} loaded (VRAM after: {mem_after:.0f} MB)", file=sys.stderr, flush=True)
         elif model is not None:
             # Model exists, just move to device if needed
+            print(f"[TRELLIS2-DEBUG] _load_model({model_key}): Model already loaded, ensuring device {device}", file=sys.stderr, flush=True)
             model.to(device)
+        else:
+            print(f"[TRELLIS2-DEBUG] _load_model({model_key}): Error - model not found and no offload manager", file=sys.stderr, flush=True)
 
         return model
 
@@ -265,6 +348,7 @@ class Pipeline:
         reloaded from disk the next time it's needed.
         """
         if self.keep_model_loaded:
+            print(f"[TRELLIS2-DEBUG] _unload_model({model_key}): keep_model_loaded=True, skipping", file=sys.stderr, flush=True)
             return  # Keep model loaded, do nothing
 
         model = self.models.get(model_key)
@@ -280,3 +364,6 @@ class Pipeline:
             mem_after = torch.cuda.memory_allocated() / 1024**2
             reserved_after = torch.cuda.memory_reserved() / 1024**2
             print(f"[TRELLIS2] {model_key} unloaded (allocated: {mem_after:.0f} MB, reserved: {reserved_after:.0f} MB)", file=sys.stderr, flush=True)
+            print(f"[TRELLIS2-DEBUG] _unload_model({model_key}): VRAM reduction: {mem_before - mem_after:.0f} MB", file=sys.stderr, flush=True)
+        else:
+            print(f"[TRELLIS2-DEBUG] _unload_model({model_key}): Model already unloaded", file=sys.stderr, flush=True)

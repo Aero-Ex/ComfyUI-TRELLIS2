@@ -125,6 +125,8 @@ def run_conditioning(
         model_config.resolution,
         model_config.attn_backend,
         model_config.vram_mode,
+        enable_gguf=getattr(model_config, 'enable_gguf', False),
+        gguf_quant=getattr(model_config, 'gguf_quant', 'Q8_0'),
     )
 
     # Convert image to PIL
@@ -233,6 +235,8 @@ def run_shape_generation(
         model_config.resolution,
         model_config.attn_backend,
         model_config.vram_mode,
+        enable_gguf=getattr(model_config, 'enable_gguf', False),
+        gguf_quant=getattr(model_config, 'gguf_quant', 'Q8_0'),
     )
     pipeline = manager.get_shape_pipeline(device)
 
@@ -357,6 +361,8 @@ def run_texture_generation(
         model_config.resolution,
         model_config.attn_backend,
         model_config.vram_mode,
+        enable_gguf=getattr(model_config, 'enable_gguf', False),
+        gguf_quant=getattr(model_config, 'gguf_quant', 'Q8_0'),
     )
     pipeline = manager.get_texture_pipeline(device)
 
@@ -426,3 +432,372 @@ def run_texture_generation(
 
     print(f"[TRELLIS2] Texture generated: {len(vertices)} verts, {len(coords)} voxels", file=sys.stderr)
     return result
+
+
+# =============================================================================
+# MULTI-IMAGE CONDITIONING FUNCTIONS
+# =============================================================================
+
+def run_multi_conditioning(
+    model_config: Any,
+    images: torch.Tensor,
+    masks: torch.Tensor,
+    include_1024: bool = True,
+    background_color: str = "black",
+) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+    """
+    Run DinoV3 conditioning extraction for multiple images.
+
+    Args:
+        model_config: Trellis2ModelConfig
+        images: ComfyUI IMAGE tensor [N, H, W, C] - batched images
+        masks: ComfyUI MASK tensor [N, H, W] - batched masks
+        include_1024: Also extract 1024px features
+        background_color: Background color name
+
+    Returns:
+        Tuple of (conditioning_dict, preprocessed_images_tensor)
+    """
+    num_images = images.shape[0]
+    print(f"[TRELLIS2] Running multi-image conditioning for {num_images} images...", file=sys.stderr)
+
+    # Background color mapping
+    bg_colors = {
+        "black": (0, 0, 0),
+        "gray": (128, 128, 128),
+        "white": (255, 255, 255),
+    }
+    bg_color = bg_colors.get(background_color, (128, 128, 128))
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Get model manager
+    manager = get_model_manager(
+        model_config.model_name,
+        model_config.resolution,
+        model_config.attn_backend,
+        model_config.vram_mode,
+        enable_gguf=getattr(model_config, 'enable_gguf', False),
+        gguf_quant=getattr(model_config, 'gguf_quant', 'Q8_0'),
+    )
+
+    # Process each image
+    pil_images = []
+    for i in range(num_images):
+        # Convert image to PIL
+        img_np = (images[i].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        pil_image = Image.fromarray(img_np)
+
+        # Process mask
+        if masks.dim() == 3:
+            mask_np = masks[i].cpu().numpy()
+        else:
+            mask_np = masks[i].cpu().numpy()
+
+        # Resize mask to match image if needed
+        if mask_np.shape[:2] != (pil_image.height, pil_image.width):
+            mask_pil = Image.fromarray((mask_np * 255).astype(np.uint8))
+            mask_pil = mask_pil.resize((pil_image.width, pil_image.height), Image.LANCZOS)
+            mask_np = np.array(mask_pil) / 255.0
+
+        # Apply mask as alpha channel
+        pil_image = pil_image.convert('RGB')
+        alpha_np = (mask_np * 255).astype(np.uint8)
+        rgba = np.dstack([np.array(pil_image), alpha_np])
+        pil_image = Image.fromarray(rgba, 'RGBA')
+
+        # Smart crop
+        pil_image = smart_crop_square(pil_image, alpha_np, margin_ratio=0.1, background_color=bg_color)
+        pil_images.append(pil_image)
+
+    # Load DinoV3 and extract features
+    model = manager.get_dinov3(device)
+
+    # Get 512px conditioning for all images
+    model.image_size = 512
+    cond_512_list = []
+    for pil_image in pil_images:
+        cond = model([pil_image])
+        cond_512_list.append(cond)
+    cond_512 = torch.stack(cond_512_list, dim=0)  # [N, B, D]
+
+    # Get 1024px conditioning if requested
+    cond_1024 = None
+    if include_1024:
+        model.image_size = 1024
+        cond_1024_list = []
+        for pil_image in pil_images:
+            cond = model([pil_image])
+            cond_1024_list.append(cond)
+        cond_1024 = torch.stack(cond_1024_list, dim=0)  # [N, B, D]
+
+    # Unload DinoV3 immediately
+    manager.unload_dinov3()
+
+    # Create negative conditioning for both resolutions
+    neg_cond_512 = torch.zeros_like(cond_512[0])  # [B, L, D]
+    neg_cond_1024 = None
+    if cond_1024 is not None:
+        neg_cond_1024 = torch.zeros_like(cond_1024[0])  # [B, L, D]
+
+    conditioning = {
+        'cond_512': cond_512.cpu(),
+        'neg_cond_512': neg_cond_512.cpu(),
+    }
+    if cond_1024 is not None:
+        conditioning['cond_1024'] = cond_1024.cpu()
+        conditioning['neg_cond_1024'] = neg_cond_1024.cpu()
+
+    # Convert preprocessed images to tensor
+    # Resize all to 512x512 for consistent stacking (images may have different sizes after smart crop)
+    target_size = (512, 512)
+    preprocessed_list = []
+    for pil_image in pil_images:
+        pil_rgb = pil_image.convert('RGB') if pil_image.mode != 'RGB' else pil_image
+        # Resize to common size for stacking
+        pil_resized = pil_rgb.resize(target_size, Image.LANCZOS)
+        preprocessed_np = np.array(pil_resized).astype(np.float32) / 255.0
+        preprocessed_list.append(torch.from_numpy(preprocessed_np))
+    preprocessed_tensor = torch.stack(preprocessed_list, dim=0)  # [N, 512, 512, C]
+
+    print(f"[TRELLIS2] Multi-image conditioning extracted: {num_images} images", file=sys.stderr)
+    return conditioning, preprocessed_tensor
+
+
+def run_multi_image_shape_generation(
+    model_config: Any,
+    conditioning: Dict[str, torch.Tensor],
+    mode: str = "stochastic",
+    seed: int = 0,
+    ss_guidance_strength: float = 7.5,
+    ss_sampling_steps: int = 12,
+    shape_guidance_strength: float = 7.5,
+    shape_sampling_steps: int = 12,
+    max_num_tokens: int = 49152,
+) -> Dict[str, Any]:
+    """
+    Run shape generation with multiple conditioning images.
+
+    Args:
+        model_config: Trellis2ModelConfig
+        conditioning: Dict with cond_512 [N, B, D], neg_cond, optionally cond_1024 [N, B, D]
+        mode: 'stochastic' or 'multidiffusion'
+        seed: Random seed
+        ss_*: Sparse structure sampling params
+        shape_*: Shape latent sampling params
+        max_num_tokens: Max tokens for 1024 cascade
+
+    Returns:
+        Dict with shape_slat, subs, mesh data, resolution, pipeline_type
+    """
+    import cumesh as CuMesh
+
+    print(f"[TRELLIS2] Running multi-image shape generation (mode={mode}, seed={seed})...", file=sys.stderr)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Move conditioning to device
+    cond_on_device = {
+        k: v.to(device) if isinstance(v, torch.Tensor) else v
+        for k, v in conditioning.items()
+    }
+
+    # Get model manager and shape pipeline
+    manager = get_model_manager(
+        model_config.model_name,
+        model_config.resolution,
+        model_config.attn_backend,
+        model_config.vram_mode,
+        enable_gguf=getattr(model_config, 'enable_gguf', False),
+        gguf_quant=getattr(model_config, 'gguf_quant', 'Q8_0'),
+    )
+    pipeline = manager.get_shape_pipeline(device)
+
+    # Build sampler params
+    sampler_params = {
+        "sparse_structure_sampler_params": {
+            "steps": ss_sampling_steps,
+            "guidance_strength": ss_guidance_strength,
+        },
+        "shape_slat_sampler_params": {
+            "steps": shape_sampling_steps,
+            "guidance_strength": shape_guidance_strength,
+        },
+    }
+
+    # Run multi-image shape generation
+    torch.cuda.reset_peak_memory_stats()
+    meshes, shape_slat, subs, res = pipeline.run_multi_image_shape(
+        cond_on_device,
+        seed=seed,
+        pipeline_type=model_config.resolution,
+        max_num_tokens=max_num_tokens,
+        mode=mode,
+        **sampler_params
+    )
+    peak_mem = torch.cuda.max_memory_allocated() / 1024**2
+    print(f"[TRELLIS2] Multi-image shape generation peak VRAM: {peak_mem:.0f} MB", file=sys.stderr)
+    mesh = meshes[0]
+    mesh.fill_holes()
+
+    # Save RAW mesh data for texture stage
+    raw_mesh_vertices = mesh.vertices.cpu()
+    raw_mesh_faces = mesh.faces.cpu()
+
+    # Convert mesh to CPU arrays for output
+    cumesh = CuMesh.CuMesh()
+    cumesh.init(mesh.vertices, mesh.faces.int())
+    cumesh.unify_face_orientations()
+    unified_verts, unified_faces = cumesh.read()
+
+    vertices = unified_verts.cpu().numpy().astype(np.float32)
+    faces = unified_faces.cpu().numpy()
+    del cumesh, unified_verts, unified_faces
+
+    # Coordinate system conversion
+    vertices[:, 1], vertices[:, 2] = vertices[:, 2].copy(), -vertices[:, 1].copy()
+
+    # Pack results
+    result = {
+        'shape_slat': _serialize_for_ipc(shape_slat),
+        'subs': _serialize_for_ipc(subs),
+        'mesh_vertices': vertices,
+        'mesh_faces': faces,
+        'resolution': res,
+        'pipeline_type': model_config.resolution,
+        'raw_mesh_vertices': raw_mesh_vertices.cpu(),
+        'raw_mesh_faces': raw_mesh_faces.cpu(),
+        'mode': mode,  # Pass mode to texture stage
+    }
+
+    manager.unload_shape_pipeline()
+
+    print(f"[TRELLIS2] Multi-image shape generated: {len(vertices)} verts, {len(faces)} faces", file=sys.stderr)
+    return result
+
+
+def run_multi_image_texture_generation(
+    model_config: Any,
+    conditioning: Dict[str, torch.Tensor],
+    shape_result: Dict[str, Any],
+    mode: str = "stochastic",
+    seed: int = 0,
+    tex_guidance_strength: float = 7.5,
+    tex_sampling_steps: int = 12,
+) -> Dict[str, Any]:
+    """
+    Run texture generation with multiple conditioning images.
+
+    Args:
+        model_config: Trellis2ModelConfig
+        conditioning: Dict with cond_512 [N, B, D], neg_cond, optionally cond_1024 [N, B, D]
+        shape_result: Result from run_multi_image_shape_generation
+        mode: 'stochastic' or 'multidiffusion'
+        seed: Random seed
+        tex_*: Texture sampling params
+
+    Returns:
+        Dict with textured mesh data
+    """
+    import cumesh as CuMesh
+    from trellis2.representations.mesh import Mesh
+
+    print(f"[TRELLIS2] Running multi-image texture generation (mode={mode}, seed={seed})...", file=sys.stderr)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Move conditioning to device
+    cond_on_device = {
+        k: v.to(device) if isinstance(v, torch.Tensor) else v
+        for k, v in conditioning.items()
+    }
+
+    # Deserialize shape data
+    shape_slat = _deserialize_from_ipc(shape_result['shape_slat'], device)
+    subs = _deserialize_from_ipc(shape_result['subs'], device)
+    resolution = shape_result['resolution']
+    pipeline_type = shape_result['pipeline_type']
+
+    # Reconstruct Mesh objects
+    raw_vertices = shape_result['raw_mesh_vertices'].to(device)
+    raw_faces = shape_result['raw_mesh_faces'].to(device)
+    mesh = Mesh(vertices=raw_vertices, faces=raw_faces)
+    mesh.fill_holes()
+    meshes = [mesh]
+
+    # Get model manager and texture pipeline
+    manager = get_model_manager(
+        model_config.model_name,
+        model_config.resolution,
+        model_config.attn_backend,
+        model_config.vram_mode,
+        enable_gguf=getattr(model_config, 'enable_gguf', False),
+        gguf_quant=getattr(model_config, 'gguf_quant', 'Q8_0'),
+    )
+    pipeline = manager.get_texture_pipeline(device)
+
+    # Build sampler params
+    sampler_params = {
+        "tex_slat_sampler_params": {
+            "steps": tex_sampling_steps,
+            "guidance_strength": tex_guidance_strength,
+        },
+    }
+
+    # Run multi-image texture generation
+    torch.cuda.reset_peak_memory_stats()
+    textured_meshes = pipeline.run_multi_image_texture(
+        cond_on_device,
+        shape_slat,
+        subs,
+        meshes,
+        resolution,
+        seed=seed,
+        pipeline_type=pipeline_type,
+        mode=mode,
+        **sampler_params
+    )
+    peak_mem = torch.cuda.max_memory_allocated() / 1024**2
+    print(f"[TRELLIS2] Multi-image texture generation peak VRAM: {peak_mem:.0f} MB", file=sys.stderr)
+    mesh = textured_meshes[0]
+    mesh.simplify(16777216)
+
+    # Get PBR layout from pipeline
+    pbr_layout = pipeline.pbr_attr_layout
+
+    # Convert mesh to outputs
+    cumesh = CuMesh.CuMesh()
+    cumesh.init(mesh.vertices, mesh.faces.int())
+    cumesh.unify_face_orientations()
+    unified_verts, unified_faces = cumesh.read()
+
+    vertices = unified_verts.cpu().numpy().astype(np.float32)
+    faces = unified_faces.cpu().numpy()
+    del cumesh, unified_verts, unified_faces
+
+    # Coordinate conversion
+    vertices[:, 1], vertices[:, 2] = vertices[:, 2].copy(), -vertices[:, 1].copy()
+
+    # Get voxel grid data
+    coords = mesh.coords.cpu().numpy().astype(np.float32)
+    attrs = mesh.attrs.cpu().numpy()
+    voxel_size = mesh.voxel_size
+
+    result = {
+        'mesh_vertices': vertices,
+        'mesh_faces': faces,
+        'voxel_coords': coords,
+        'voxel_attrs': attrs,
+        'voxel_size': voxel_size,
+        'pbr_layout': pbr_layout,
+        'original_vertices': mesh.vertices.cpu(),
+        'original_faces': mesh.faces.cpu(),
+    }
+
+    manager.unload_texture_pipeline()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    print(f"[TRELLIS2] Multi-image texture generated: {len(vertices)} verts, {len(coords)} voxels", file=sys.stderr)
+    return result
+

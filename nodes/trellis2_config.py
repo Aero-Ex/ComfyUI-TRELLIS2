@@ -20,6 +20,9 @@ class Trellis2ModelConfig:
         resolution: str = "1024_cascade",
         attn_backend: str = "auto",
         vram_mode: str = "keep_loaded",
+        enable_gguf: bool = False,
+        gguf_quant: str = "Q8_0",
+        enable_fp8: bool = False,
     ):
         """
         Initialize model configuration.
@@ -32,15 +35,22 @@ class Trellis2ModelConfig:
                 - "keep_loaded": Keep all models in VRAM (fastest, ~12GB VRAM)
                 - "cpu_offload": Offload unused models to CPU RAM (~3-4GB VRAM)
                 - "disk_offload": Delete unused models, reload from disk (~3GB VRAM)
+            enable_gguf: Whether to use GGUF models if available
+            gguf_quant: Preferred GGUF quantization level (e.g., Q8_0, Q4_K_M)
+            enable_fp8: Whether to use FP8 scaled safetensors if available
         """
         self.model_name = model_name
         self.resolution = resolution
         self.attn_backend = attn_backend
         self.vram_mode = vram_mode
+        self.enable_gguf = enable_gguf
+        self.gguf_quant = gguf_quant
+        self.enable_fp8 = enable_fp8
 
     def __repr__(self) -> str:
         return (
             f"Trellis2ModelConfig(model={self.model_name}, "
             f"resolution={self.resolution}, attn_backend={self.attn_backend}, "
-            f"vram_mode={self.vram_mode})"
+            f"vram_mode={self.vram_mode}, enable_gguf={self.enable_gguf}, "
+            f"gguf_quant={self.gguf_quant})"
         )
