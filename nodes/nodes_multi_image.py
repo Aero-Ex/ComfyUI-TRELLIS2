@@ -55,7 +55,7 @@ Supports 2-8 images for best results.
         return (conditioning, preprocessed_images)
 
 
-@isolated(env="trellis2", import_paths=[".", ".."], timeout=1800)
+@smart_isolated(env="trellis2", import_paths=[".", ".."], timeout=1800)
 class Trellis2MultiImageToShape:
     """Generate 3D shape from multiple conditioning images using TRELLIS.2."""
 
@@ -131,7 +131,7 @@ The model will incorporate features from all input views for more complete geome
         return (shape_result, tri_mesh)
 
 
-@isolated(env="trellis2", import_paths=[".", ".."], timeout=1800)
+@smart_isolated(env="trellis2", import_paths=[".", ".."], timeout=1800)
 class Trellis2MultiImageToTexturedMesh:
     """Generate PBR textured mesh from shape using multiple conditioning images."""
 

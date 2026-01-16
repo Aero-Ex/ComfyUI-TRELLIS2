@@ -1,6 +1,6 @@
 """Inference nodes for TRELLIS.2 Image-to-3D generation.
 
-All GPU inference runs inside isolated subprocess via @isolated decorator.
+All GPU inference runs inside isolated subprocess via @smart_isolated decorator.
 """
 
 from .utils.isolation import smart_isolated
@@ -61,7 +61,7 @@ Use any background removal node (BiRefNet, rembg, etc.) to generate the mask.
         return (conditioning, preprocessed_image)
 
 
-@isolated(env="trellis2", import_paths=[".", ".."], timeout=1800)  # 30 min for slow HR cascade
+@smart_isolated(env="trellis2", import_paths=[".", ".."], timeout=1800)  # 30 min for slow HR cascade
 class Trellis2ImageToShape:
     """Generate 3D shape from conditioning using TRELLIS.2."""
 
@@ -143,7 +143,7 @@ Returns:
         return (shape_result, tri_mesh)
 
 
-@isolated(env="trellis2", import_paths=[".", ".."], timeout=1800)  # 30 min for safety
+@smart_isolated(env="trellis2", import_paths=[".", ".."], timeout=1800)  # 30 min for safety
 class Trellis2ShapeToTexturedMesh:
     """Generate PBR textured mesh from shape using TRELLIS.2."""
 
