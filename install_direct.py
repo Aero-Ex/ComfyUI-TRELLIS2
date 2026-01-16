@@ -5,7 +5,8 @@ Direct installation script for TRELLIS2 dependencies.
 This installs all dependencies INTO THE HOST PYTHON ENVIRONMENT,
 bypassing the isolated venv. Use this when you want to run with direct_mode=True.
 
-Uses pre-built wheels from pozzettiandrea/cumesh-wheels for CUDA 12.8 + PyTorch 2.8.0.
+Uses pre-built wheels from PozzettiAndrea for CUDA 12.8 + PyTorch 2.8.0.
+Supports Python 3.10, 3.11, 3.12, 3.13 on Linux and Windows.
 
 WARNING: This may cause conflicts with other ComfyUI nodes. Use at your own risk.
 
@@ -16,13 +17,15 @@ After installation, set direct_mode=True in the Load TRELLIS.2 Models node.
 """
 
 import sys
-import os
 import subprocess
-from pathlib import Path
 
 
 # Pre-built wheel sources for CUDA 12.8 + PyTorch 2.8.0
-CUMESH_WHEEL_INDEX = "https://pozzettiandrea.github.io/cumesh-wheels/cu128-torch280/"
+WHEEL_INDEXES = {
+    "cumesh": "https://pozzettiandrea.github.io/cumesh-wheels/cu128-torch280/",
+    "flex_gemm": "https://pozzettiandrea.github.io/flexgemm-wheels/cu128-torch280/",
+    "o_voxel": "https://pozzettiandrea.github.io/ovoxel-wheels/cu128-torch280/",
+}
 
 
 def main():
@@ -34,6 +37,7 @@ def main():
     print("         This may conflict with other packages. Use at your own risk.")
     print()
     print("Using pre-built wheels for CUDA 12.8 + PyTorch 2.8.0")
+    print(f"Python: {sys.version_info.major}.{sys.version_info.minor}")
     print()
     
     # PyPI packages
@@ -72,25 +76,27 @@ def main():
         print(f"ERROR: Failed to install PyPI packages: {e}")
         return 1
     
-    # Install cumesh from pre-built wheels (CUDA 12.8 + PyTorch 2.8.0)
+    # Install CUDA extensions from pre-built wheels
     print()
     print("=" * 70)
-    print("Step 2: Installing CuMesh (CUDA 12.8 + PyTorch 2.8.0 wheels)...")
+    print("Step 2: Installing CUDA extensions (CUDA 12.8 + PyTorch 2.8.0)...")
     print("=" * 70)
     
-    try:
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install",
-            "cumesh", "--find-links", CUMESH_WHEEL_INDEX
-        ])
-        print("         cumesh installed successfully!")
-    except subprocess.CalledProcessError as e:
-        print(f"WARNING: Failed to install cumesh: {e}")
+    for pkg_name, wheel_index in WHEEL_INDEXES.items():
+        print(f"\nInstalling {pkg_name}...")
+        try:
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install",
+                pkg_name, "--find-links", wheel_index
+            ])
+            print(f"         {pkg_name} installed successfully!")
+        except subprocess.CalledProcessError as e:
+            print(f"WARNING: Failed to install {pkg_name}: {e}")
     
     # Install nvdiffrast from source
     print()
     print("=" * 70)
-    print("Step 3: Installing nvdiffrast from source...")
+    print("Step 3: Installing nvdiffrast from GitHub...")
     print("=" * 70)
     
     try:
@@ -102,40 +108,6 @@ def main():
         print("         nvdiffrast installed successfully!")
     except subprocess.CalledProcessError as e:
         print(f"WARNING: Failed to install nvdiffrast: {e}")
-    
-    # Build flex_gemm and o_voxel from source
-    print()
-    print("=" * 70)
-    print("Step 4: Building flex_gemm and o_voxel from source...")
-    print("=" * 70)
-    
-    build_dir = Path(__file__).parent / "_build_temp"
-    build_dir.mkdir(exist_ok=True)
-    
-    source_repos = [
-        ("flex_gemm", "https://github.com/JeffreyXiang/FlexGEMM.git"),
-        ("o_voxel", "https://github.com/JeffreyXiang/o-voxel.git"),
-    ]
-    
-    for pkg_name, repo_url in source_repos:
-        print(f"\nBuilding {pkg_name} from source...")
-        pkg_dir = build_dir / pkg_name
-        
-        if not pkg_dir.exists():
-            try:
-                subprocess.check_call(["git", "clone", "--depth", "1", repo_url, str(pkg_dir)])
-            except subprocess.CalledProcessError as e:
-                print(f"WARNING: Failed to clone {pkg_name}: {e}")
-                continue
-        
-        try:
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install",
-                str(pkg_dir), "--no-build-isolation"
-            ])
-            print(f"         {pkg_name} built successfully!")
-        except subprocess.CalledProcessError as e:
-            print(f"WARNING: Failed to build {pkg_name}: {e}")
     
     print()
     print("=" * 70)
