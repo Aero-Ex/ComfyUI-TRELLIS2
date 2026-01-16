@@ -1233,34 +1233,38 @@ class Trellis2ImageTo3DPipeline(Pipeline):
 
             # Create index list that cycles through images
             cond_indices = (np.arange(num_steps) % num_images).tolist()
+            # Cache for timestep -> image index to ensure consistency within a step
+            step_cache = {}
 
             def _new_inference_model(self, model, x_t, t, cond, **kwargs):
-                cond_idx = cond_indices.pop(0)
+                t_key = float(t)
+                if t_key not in step_cache:
+                    step_cache[t_key] = cond_indices.pop(0)
+                
+                cond_idx = step_cache[t_key]
                 cond_i = cond[cond_idx]
+                
                 # Filter out sampler-specific kwargs only if they are NOT expected by the old method
-                # This ensures mixins still get their arguments while the base model doesn't
                 import inspect
                 sig = inspect.signature(self._old_inference_model)
                 model_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or k not in SAMPLER_KWARGS}
                 return self._old_inference_model(model, x_t, t, cond=cond_i, **model_kwargs)
 
         elif mode == 'multidiffusion':
-            from .samplers import FlowEulerSampler
-
             def _new_inference_model(self, model, x_t, t, cond, neg_cond, guidance_strength, **kwargs):
-                # Filter out sampler-specific kwargs before passing to model
-                model_kwargs = {k: v for k, v in kwargs.items() if k not in SAMPLER_KWARGS}
-                
-                # Run model for each conditioning image and average predictions
+                # Run model for each conditioning image with guidance_strength=1 (unguided pos)
+                # This ensures GuidanceIntervalSamplerMixin and CFG mixin are respected
                 preds = []
                 for i in range(len(cond)):
-                    pred = FlowEulerSampler._inference_model(self, model, x_t, t, cond[i], **model_kwargs)
+                    pred = self._old_inference_model(model, x_t, t, cond[i], neg_cond=neg_cond, guidance_strength=1, **kwargs)
                     preds.append(pred)
-                pred = sum(preds) / len(preds)
+                avg_pred_pos = sum(preds) / len(preds)
 
-                # Apply CFG with negative conditioning
-                neg_pred = FlowEulerSampler._inference_model(self, model, x_t, t, neg_cond, **model_kwargs)
-                return (1 + guidance_strength) * pred - guidance_strength * neg_pred
+                # Run model once with guidance_strength=0 (unguided neg)
+                pred_neg = self._old_inference_model(model, x_t, t, cond[0], neg_cond=neg_cond, guidance_strength=0, **kwargs)
+
+                # Combine using standard CFG formula: pred = guidance_strength * pos + (1 - guidance_strength) * neg
+                return guidance_strength * avg_pred_pos + (1 - guidance_strength) * pred_neg
 
         else:
             raise ValueError(f"Unsupported mode: {mode}. Use 'stochastic' or 'multidiffusion'.")
