@@ -21,23 +21,12 @@ import subprocess
 from pathlib import Path
 
 
-# Wheel download URLs for cp310 Linux x86_64
-WHEEL_BASE_URL = "https://github.com/JeffreyXiang/Storages/releases/download/Space_Wheels_251210"
+# Wheel download URLs for cp310 Linux x86_64 from microsoft/TRELLIS.2 on HuggingFace
+HF_WHEEL_BASE = "https://huggingface.co/microsoft/TRELLIS.2/resolve/main/wheels"
 
 CUDA_WHEELS = [
-    f"{WHEEL_BASE_URL}/cumesh-0.0.1-cp310-cp310-linux_x86_64.whl",
-    f"{WHEEL_BASE_URL}/flex_gemm-0.0.1-cp310-cp310-linux_x86_64.whl",
-    f"{WHEEL_BASE_URL}/o_voxel-0.0.1-cp310-cp310-linux_x86_64.whl",
-    f"{WHEEL_BASE_URL}/nvdiffrast-0.3.5-cp310-cp310-linux_x86_64.whl",
-    f"{WHEEL_BASE_URL}/nvdiffrec_render-0.0.0-cp310-cp310-linux_x86_64.whl",
-]
-
-# HuggingFace mirror (alternative)
-HF_WHEEL_BASE = "https://huggingface.co/spaces/JeffreyXiang/TRELLIS.2/resolve/main/wheels"
-
-HF_CUDA_WHEELS = [
     f"{HF_WHEEL_BASE}/cumesh-0.0.1-cp310-cp310-linux_x86_64.whl",
-    f"{HF_WHEEL_BASE}/flex_gemm-0.0.1-cp310-cp310-linux_x86_64.whl", 
+    f"{HF_WHEEL_BASE}/flex_gemm-0.0.1-cp310-cp310-linux_x86_64.whl",
     f"{HF_WHEEL_BASE}/o_voxel-0.0.1-cp310-cp310-linux_x86_64.whl",
     f"{HF_WHEEL_BASE}/nvdiffrast-0.3.5-cp310-cp310-linux_x86_64.whl",
     f"{HF_WHEEL_BASE}/nvdiffrec_render-0.0.0-cp310-cp310-linux_x86_64.whl",
@@ -99,13 +88,12 @@ def main():
         print(f"ERROR: Failed to install PyPI packages: {e}")
         return 1
     
-    # Install CUDA extensions from GitHub
+    # Install CUDA extensions from HuggingFace
     print()
     print("=" * 70)
     print("Step 2: Installing CUDA extensions (cp310 Linux x86_64)...")
     print("=" * 70)
     
-    # Try GitHub first, then HuggingFace
     for wheel_url in CUDA_WHEELS:
         wheel_name = wheel_url.split("/")[-1]
         print(f"\nInstalling {wheel_name}...")
@@ -113,16 +101,8 @@ def main():
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install", "--no-deps", wheel_url
             ])
-        except subprocess.CalledProcessError:
-            # Try HuggingFace mirror
-            hf_url = wheel_url.replace(WHEEL_BASE_URL, HF_WHEEL_BASE)
-            print(f"         Trying HuggingFace mirror...")
-            try:
-                subprocess.check_call([
-                    sys.executable, "-m", "pip", "install", "--no-deps", hf_url
-                ])
-            except subprocess.CalledProcessError as e:
-                print(f"WARNING: Failed to install {wheel_name}: {e}")
+        except subprocess.CalledProcessError as e:
+            print(f"WARNING: Failed to install {wheel_name}: {e}")
     
     print()
     print("=" * 70)
