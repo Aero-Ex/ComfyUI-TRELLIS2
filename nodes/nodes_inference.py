@@ -3,10 +3,10 @@
 All GPU inference runs inside isolated subprocess via @isolated decorator.
 """
 
-from comfy_env import isolated
+from .utils.isolation import smart_isolated
 
 
-@isolated(env="trellis2", import_paths=[".", ".."])
+@smart_isolated(env="trellis2", import_paths=[".", ".."])
 class Trellis2GetConditioning:
     """Extract image conditioning using DinoV3 for TRELLIS.2."""
 

@@ -8,11 +8,10 @@ from pathlib import Path
 
 import folder_paths
 
-from comfy_env import isolated
-from .utils import logger
+from .utils.isolation import smart_isolated
 
 
-@isolated(env="trellis2", import_paths=[".", ".."])
+@smart_isolated(env="trellis2", import_paths=[".", ".."])
 class Trellis2Simplify:
     """Simplify mesh to target face count using CuMesh."""
 
@@ -143,7 +142,7 @@ Parameters:
         return (result,)
 
 
-@isolated(env="trellis2", import_paths=[".", ".."])
+@smart_isolated(env="trellis2", import_paths=[".", ".."])
 class Trellis2UVUnwrap:
     """UV unwrap mesh using CuMesh/xatlas. No texture baking."""
 
@@ -253,7 +252,7 @@ TIP: Simplify mesh first! UV unwrapping 10M faces takes forever.
         return (result,)
 
 
-@isolated(env="trellis2", import_paths=[".", ".."])
+@smart_isolated(env="trellis2", import_paths=[".", ".."])
 class Trellis2RasterizePBR:
     """Rasterize PBR textures from voxel data onto UV-mapped mesh."""
 

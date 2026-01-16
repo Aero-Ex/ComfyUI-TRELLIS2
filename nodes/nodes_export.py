@@ -7,13 +7,13 @@ from datetime import datetime
 
 import folder_paths
 
-from comfy_env import isolated
+from .utils.isolation import smart_isolated
 
 # Create logger for non-isolated classes (can't use relative import due to isolated subprocess)
 logger = logging.getLogger("[TRELLIS2]")
 
 
-@isolated(env="trellis2", import_paths=[".", ".."])
+@smart_isolated(env="trellis2", import_paths=[".", ".."])
 class Trellis2ExportGLB:
     """Export TRELLIS.2 mesh to GLB format with PBR textures from voxel data."""
 

@@ -34,6 +34,7 @@ class LoadTrellis2Models:
             "optional": {
                 "attn_backend": (ATTN_BACKENDS, {"default": "flash_attn"}),
                 "vram_mode": (VRAM_MODES, {"default": "keep_loaded"}),
+                "direct_mode": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -45,7 +46,7 @@ class LoadTrellis2Models:
 Load TRELLIS.2 model configuration for image-to-3D generation.
 
 This node creates a configuration object that inference nodes use
-to load models on-demand inside isolated subprocess environments.
+to load models on-demand.
 
 Resolution modes:
 - 512: Fast, lower quality
@@ -62,12 +63,17 @@ VRAM mode:
 - keep_loaded: Keep all models in VRAM (fastest, ~12GB VRAM)
 - cpu_offload: Offload unused models to CPU RAM (~3-4GB VRAM, ~15-25% slower)
 - disk_offload: Delete unused models, reload from disk (~3GB VRAM & CPU RAM, ~2-3x slower)
+
+Direct mode:
+- If enabled, runs inference in the main ComfyUI process instead of an isolated venv.
+  Use this if you are on a cloud service that doesn't allow virtual environments.
+  Note: You must have all dependencies installed in your main environment.
 """
 
-    def load_models(self, resolution='1024_cascade', attn_backend="flash_attn", vram_mode="keep_loaded", enable_gguf=False, gguf_quant="Q8_0", enable_fp8=False):
-        print(f"[TRELLIS2-DEBUG] LoadTrellis2Models.load_models: resolution={resolution}, attn_backend={attn_backend}, vram_mode={vram_mode}, enable_gguf={enable_gguf}, gguf_quant={gguf_quant}, enable_fp8={enable_fp8}")
+    def load_models(self, resolution='1024_cascade', attn_backend="flash_attn", vram_mode="keep_loaded", enable_gguf=False, gguf_quant="Q8_0", enable_fp8=False, direct_mode=False):
+        print(f"[TRELLIS2-DEBUG] LoadTrellis2Models.load_models: resolution={resolution}, attn_backend={attn_backend}, vram_mode={vram_mode}, enable_gguf={enable_gguf}, gguf_quant={gguf_quant}, enable_fp8={enable_fp8}, direct_mode={direct_mode}")
         # Create lightweight config object
-        # Actual model loading happens in @isolated subprocess methods
+        # Actual model loading happens in @isolated subprocess methods (unless direct_mode is True)
         config = Trellis2ModelConfig(
             model_name="microsoft/TRELLIS.2-4B",
             resolution=resolution,
@@ -76,6 +82,7 @@ VRAM mode:
             enable_gguf=enable_gguf,
             gguf_quant=gguf_quant,
             enable_fp8=enable_fp8,
+            direct_mode=direct_mode,
         )
         return (config,)
 

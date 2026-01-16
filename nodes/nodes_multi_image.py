@@ -3,10 +3,10 @@
 Provides nodes that accept multiple images as input for improved 3D generation.
 """
 
-from comfy_env import isolated
+from .utils.isolation import smart_isolated
 
 
-@isolated(env="trellis2", import_paths=[".", ".."])
+@smart_isolated(env="trellis2", import_paths=[".", ".."])
 class Trellis2MultiImageConditioning:
     """Extract conditioning from multiple images for multi-view 3D generation."""
 

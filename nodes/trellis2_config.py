@@ -23,6 +23,7 @@ class Trellis2ModelConfig:
         enable_gguf: bool = False,
         gguf_quant: str = "Q8_0",
         enable_fp8: bool = False,
+        direct_mode: bool = False,
     ):
         """
         Initialize model configuration.
@@ -38,6 +39,7 @@ class Trellis2ModelConfig:
             enable_gguf: Whether to use GGUF models if available
             gguf_quant: Preferred GGUF quantization level (e.g., Q8_0, Q4_K_M)
             enable_fp8: Whether to use FP8 scaled safetensors if available
+            direct_mode: Whether to run in the main process (bypass venv)
         """
         self.model_name = model_name
         self.resolution = resolution
@@ -46,6 +48,7 @@ class Trellis2ModelConfig:
         self.enable_gguf = enable_gguf
         self.gguf_quant = gguf_quant
         self.enable_fp8 = enable_fp8
+        self.direct_mode = direct_mode
 
     def __repr__(self) -> str:
         return (
