@@ -29,35 +29,28 @@ def smart_isolated(*args, **kwargs):
         # Apply the base isolated decorator
         isolated_cls = base_isolated(cls)
         
-        # If we have comfy-env, we want to wrap the proxy to check for direct_mode at runtime
+        # If we have comfy-env, we want to wrap the execution method to check for direct_mode at runtime
         if HAS_COMFY_ENV:
-            original_init = isolated_cls.__init__
-            
-            # We need to wrap the methods to check for direct_mode in the first argument (usually model_config)
-            # This is complex because comfy-env replaces methods with proxies.
-            # However, comfy-env's proxy checks for a 'local' keyword argument.
-            
-            # We can wrap the methods of the isolated class
-            for attr_name in dir(isolated_cls):
-                if not attr_name.startswith("_") and callable(getattr(isolated_cls, attr_name)):
-                    method = getattr(isolated_cls, attr_name)
+            func_name = getattr(isolated_cls, "FUNCTION", None)
+            if func_name and hasattr(isolated_cls, func_name):
+                original_method = getattr(isolated_cls, func_name)
+                
+                @functools.wraps(original_method)
+                def wrapped_method(self, *m_args, **m_kwargs):
+                    # Check if first non-self argument is a config with direct_mode
+                    # In TRELLIS2 nodes, the first arg after 'self' is usually model_config
+                    config = None
+                    if len(m_args) > 0:
+                        config = m_args[0]
+                    elif 'model_config' in m_kwargs:
+                        config = m_kwargs['model_config']
                     
-                    @functools.wraps(method)
-                    def wrapped_method(*m_args, **m_kwargs):
-                        # Check if first non-self argument is a config with direct_mode
-                        # In ComfyUI, the first arg after 'self' is usually the model_config
-                        if len(m_args) > 1:
-                            config = m_args[1]
-                            if hasattr(config, 'direct_mode') and config.direct_mode:
-                                m_kwargs['local'] = True
-                        elif 'model_config' in m_kwargs:
-                            config = m_kwargs['model_config']
-                            if hasattr(config, 'direct_mode') and config.direct_mode:
-                                m_kwargs['local'] = True
-                                
-                        return method(*m_args, **m_kwargs)
-                    
-                    setattr(isolated_cls, attr_name, wrapped_method)
+                    if config and hasattr(config, 'direct_mode') and config.direct_mode:
+                        m_kwargs['local'] = True
+                        
+                    return original_method(self, *m_args, **m_kwargs)
+                
+                setattr(isolated_cls, func_name, wrapped_method)
                     
         return isolated_cls
         

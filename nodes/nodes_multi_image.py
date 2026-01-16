@@ -17,8 +17,6 @@ class Trellis2MultiImageConditioning:
                 "model_config": ("TRELLIS2_MODEL_CONFIG",),
                 "images": ("IMAGE",),  # Batched images [N, H, W, C]
                 "masks": ("MASK",),    # Batched masks [N, H, W]
-            },
-            "optional": {
                 "include_1024": ("BOOLEAN", {"default": True}),
                 "background_color": (["black", "gray", "white"], {"default": "black"}),
             },
@@ -69,7 +67,6 @@ class Trellis2MultiImageToShape:
             "optional": {
                 "mode": (["stochastic", "multidiffusion"], {
                     "default": "stochastic",
-                    "tooltip": "stochastic: cycles images per step (faster). multidiffusion: averages predictions (higher quality)"
                 }),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1}),
                 "ss_guidance_strength": ("FLOAT", {"default": 7.5, "min": 1.0, "max": 20.0, "step": 0.1}),
@@ -146,7 +143,6 @@ class Trellis2MultiImageToTexturedMesh:
             "optional": {
                 "mode": (["stochastic", "multidiffusion"], {
                     "default": "stochastic",
-                    "tooltip": "stochastic: cycles images per step (faster). multidiffusion: averages predictions (higher quality)"
                 }),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1}),
                 "tex_guidance_strength": ("FLOAT", {"default": 7.5, "min": 1.0, "max": 20.0, "step": 0.1}),

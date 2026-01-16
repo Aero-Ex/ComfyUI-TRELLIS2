@@ -17,8 +17,6 @@ class Trellis2GetConditioning:
                 "model_config": ("TRELLIS2_MODEL_CONFIG",),
                 "image": ("IMAGE",),
                 "mask": ("MASK",),
-            },
-            "optional": {
                 "include_1024": ("BOOLEAN", {"default": True}),
                 "background_color": (["black", "gray", "white"], {"default": "black"}),
             },
@@ -69,19 +67,19 @@ class Trellis2ImageToShape:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model_config": ("TRELLIS2_MODEL_CONFIG", {"tooltip": "Model config from Load TRELLIS.2 Models node"}),
-                "conditioning": ("TRELLIS2_CONDITIONING", {"tooltip": "Image conditioning from Get Conditioning node"}),
+                "model_config": ("TRELLIS2_MODEL_CONFIG",),
+                "conditioning": ("TRELLIS2_CONDITIONING",),
             },
             "optional": {
-                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1, "tooltip": "Random seed for reproducible generation"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1}),
                 # Sparse Structure Sampler
-                "ss_guidance_strength": ("FLOAT", {"default": 7.5, "min": 1.0, "max": 20.0, "step": 0.1, "tooltip": "Sparse structure CFG scale. Higher = stronger adherence to input image"}),
-                "ss_sampling_steps": ("INT", {"default": 12, "min": 1, "max": 50, "step": 1, "tooltip": "Sparse structure sampling steps. More steps = better quality but slower"}),
+                "ss_guidance_strength": ("FLOAT", {"default": 7.5, "min": 1.0, "max": 20.0, "step": 0.1}),
+                "ss_sampling_steps": ("INT", {"default": 12, "min": 1, "max": 50, "step": 1}),
                 # Shape SLat Sampler
-                "shape_guidance_strength": ("FLOAT", {"default": 7.5, "min": 1.0, "max": 20.0, "step": 0.1, "tooltip": "Shape CFG scale. Higher = stronger adherence to input image"}),
-                "shape_sampling_steps": ("INT", {"default": 12, "min": 1, "max": 50, "step": 1, "tooltip": "Shape sampling steps. More steps = better quality but slower"}),
+                "shape_guidance_strength": ("FLOAT", {"default": 7.5, "min": 1.0, "max": 20.0, "step": 0.1}),
+                "shape_sampling_steps": ("INT", {"default": 12, "min": 1, "max": 50, "step": 1}),
                 # VRAM Control
-                "max_tokens": ("INT", {"default": 49152, "min": 16384, "max": 65536, "step": 4096, "tooltip": "Max tokens for 1024 cascade. Lower = less VRAM but potentially lower quality. Default 49152 (~9GB), try 32768 (~7GB) or 24576 (~6GB) for lower VRAM."}),
+                "max_tokens": ("INT", {"default": 49152, "min": 16384, "max": 65536, "step": 4096}),
             }
         }
 
@@ -151,14 +149,14 @@ class Trellis2ShapeToTexturedMesh:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model_config": ("TRELLIS2_MODEL_CONFIG", {"tooltip": "Model config from Load TRELLIS.2 Models node"}),
-                "conditioning": ("TRELLIS2_CONDITIONING", {"tooltip": "Image conditioning from Get Conditioning node (same as used for shape)"}),
-                "shape_result": ("TRELLIS2_SHAPE_RESULT", {"tooltip": "Shape result from Image to Shape node"}),
+                "model_config": ("TRELLIS2_MODEL_CONFIG",),
+                "conditioning": ("TRELLIS2_CONDITIONING",),
+                "shape_result": ("TRELLIS2_SHAPE_RESULT",),
             },
             "optional": {
-                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1, "tooltip": "Random seed for texture variation"}),
-                "tex_guidance_strength": ("FLOAT", {"default": 7.5, "min": 1.0, "max": 20.0, "step": 0.1, "tooltip": "Texture CFG scale. Higher = stronger adherence to input image"}),
-                "tex_sampling_steps": ("INT", {"default": 12, "min": 1, "max": 50, "step": 1, "tooltip": "Texture sampling steps. More steps = better quality but slower"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1}),
+                "tex_guidance_strength": ("FLOAT", {"default": 7.5, "min": 1.0, "max": 20.0, "step": 0.1}),
+                "tex_sampling_steps": ("INT", {"default": 12, "min": 1, "max": 50, "step": 1}),
             }
         }
 
