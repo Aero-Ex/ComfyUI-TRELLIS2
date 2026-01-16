@@ -3,7 +3,10 @@
 All GPU inference runs inside isolated subprocess via @smart_isolated decorator.
 """
 
-from .utils.isolation import smart_isolated
+try:
+    from .utils.isolation import smart_isolated
+except ImportError:
+    from utils.isolation import smart_isolated
 
 
 @smart_isolated(env="trellis2", import_paths=[".", ".."])
@@ -308,7 +311,10 @@ Returns:
         import comfy.model_management as mm
 
         # Lazy import rembg from trellis2
-        from ..trellis2.pipelines import rembg
+        try:
+            from ..trellis2.pipelines import rembg
+        except ImportError:
+            from trellis2.pipelines import rembg
 
         device = mm.get_torch_device()
 

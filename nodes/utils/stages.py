@@ -15,8 +15,12 @@ import torch
 import numpy as np
 from PIL import Image
 
-from .lazy_manager import get_model_manager
-from .helpers import smart_crop_square
+try:
+    from .lazy_manager import get_model_manager
+    from .helpers import smart_crop_square
+except ImportError:
+    from lazy_manager import get_model_manager
+    from helpers import smart_crop_square
 
 
 def _sparse_tensor_to_dict(st) -> Dict[str, Any]:

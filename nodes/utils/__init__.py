@@ -42,17 +42,30 @@ def get_birefnet_models_dir():
 # (These import trellis2 modules which require CUDA extensions)
 def _import_subprocess_utils():
     """Lazy import of subprocess utilities."""
-    from .lazy_manager import get_model_manager, LazyModelManager
-    from .stages import (
-        run_conditioning,
-        run_shape_generation,
-        run_texture_generation,
-    )
-    from .helpers import (
-        tensor_to_pil,
-        pil_to_tensor,
-        smart_crop_square,
-    )
+    try:
+        from .lazy_manager import get_model_manager, LazyModelManager
+        from .stages import (
+            run_conditioning,
+            run_shape_generation,
+            run_texture_generation,
+        )
+        from .helpers import (
+            tensor_to_pil,
+            pil_to_tensor,
+            smart_crop_square,
+        )
+    except ImportError:
+        from lazy_manager import get_model_manager, LazyModelManager
+        from stages import (
+            run_conditioning,
+            run_shape_generation,
+            run_texture_generation,
+        )
+        from helpers import (
+            tensor_to_pil,
+            pil_to_tensor,
+            smart_crop_square,
+        )
     return {
         'get_model_manager': get_model_manager,
         'LazyModelManager': LazyModelManager,

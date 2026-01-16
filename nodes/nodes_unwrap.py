@@ -8,7 +8,10 @@ from pathlib import Path
 
 import folder_paths
 
-from .utils.isolation import smart_isolated
+try:
+    from .utils.isolation import smart_isolated
+except ImportError:
+    from utils.isolation import smart_isolated
 
 
 @smart_isolated(env="trellis2", import_paths=[".", ".."])

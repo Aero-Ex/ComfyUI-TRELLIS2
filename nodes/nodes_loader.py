@@ -4,7 +4,10 @@ This returns a lightweight config object - actual model loading
 happens inside @isolated subprocess methods.
 """
 
-from .trellis2_config import Trellis2ModelConfig
+try:
+    from .trellis2_config import Trellis2ModelConfig
+except ImportError:
+    from trellis2_config import Trellis2ModelConfig
 
 # Resolution modes (matching original TRELLIS.2)
 RESOLUTION_MODES = ['512', '1024_cascade', '1536_cascade']

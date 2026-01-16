@@ -7,7 +7,10 @@ from datetime import datetime
 
 import folder_paths
 
-from .utils.isolation import smart_isolated
+try:
+    from .utils.isolation import smart_isolated
+except ImportError:
+    from utils.isolation import smart_isolated
 
 # Create logger for non-isolated classes (can't use relative import due to isolated subprocess)
 logger = logging.getLogger("[TRELLIS2]")
