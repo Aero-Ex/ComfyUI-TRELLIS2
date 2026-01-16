@@ -12,26 +12,16 @@ from typing import Optional
 
 import torch
 
-# Ensure trellis2 and other module paths are in sys.path (needed for direct_mode)
+# Ensure trellis2 module path is in sys.path (needed for direct_mode)
 # When running in isolation, comfy_env handles this; in direct_mode we need to add it manually
 _TRELLIS2_ROOT = Path(__file__).parent.parent.parent  # ComfyUI-TRELLIS2/
 if str(_TRELLIS2_ROOT) not in sys.path:
     sys.path.insert(0, str(_TRELLIS2_ROOT))
 
-# Also add the venv site-packages for cumesh, o_voxel, flex_gemm
-# These are installed in: _env_trellis2/Lib/site-packages (Windows) or _env_trellis2/lib/python*/site-packages (Linux)
-_VENV_DIR = _TRELLIS2_ROOT / "_env_trellis2"
-if _VENV_DIR.exists():
-    # Try Windows layout first
-    _SITE_PACKAGES = _VENV_DIR / "Lib" / "site-packages"
-    if not _SITE_PACKAGES.exists():
-        # Try Linux layout
-        for lib_dir in (_VENV_DIR / "lib").glob("python*"):
-            _SITE_PACKAGES = lib_dir / "site-packages"
-            if _SITE_PACKAGES.exists():
-                break
-    if _SITE_PACKAGES.exists() and str(_SITE_PACKAGES) not in sys.path:
-        sys.path.insert(0, str(_SITE_PACKAGES))
+# NOTE: Do NOT add venv site-packages to sys.path here!
+# In direct_mode, CUDA extensions (cumesh, o_voxel, flex_gemm) should be installed
+# in the host Python via install_direct.py, not loaded from the venv.
+# The venv packages are built for a different Python version and won't work.
 
 
 # Global model manager instance
