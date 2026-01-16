@@ -26,31 +26,36 @@ def smart_isolated(*args, **kwargs):
         if not HAS_COMFY_ENV:
             return cls
             
-        # Apply the base isolated decorator
+        # Capture the original method before it gets proxied
+        func_name = getattr(cls, "FUNCTION", None)
+        original_method = None
+        if func_name and hasattr(cls, func_name):
+            original_method = getattr(cls, func_name)
+
+        # Apply the base isolated decorator (returns a class with proxies)
         isolated_cls = base_isolated(cls)
         
-        # If we have comfy-env, we want to wrap the execution method to check for direct_mode at runtime
-        if HAS_COMFY_ENV:
-            func_name = getattr(isolated_cls, "FUNCTION", None)
-            if func_name and hasattr(isolated_cls, func_name):
-                original_method = getattr(isolated_cls, func_name)
+        # If we have comfy-env and a method to wrap, handle direct_mode at runtime
+        if HAS_COMFY_ENV and original_method:
+            proxy_method = getattr(isolated_cls, func_name)
+            
+            @functools.wraps(original_method)
+            def wrapped_method(self, *m_args, **m_kwargs):
+                # Check if first non-self argument is a config with direct_mode
+                config = None
+                if len(m_args) > 0:
+                    config = m_args[0]
+                elif 'model_config' in m_kwargs:
+                    config = m_kwargs['model_config']
                 
-                @functools.wraps(original_method)
-                def wrapped_method(self, *m_args, **m_kwargs):
-                    # Check if first non-self argument is a config with direct_mode
-                    # In TRELLIS2 nodes, the first arg after 'self' is usually model_config
-                    config = None
-                    if len(m_args) > 0:
-                        config = m_args[0]
-                    elif 'model_config' in m_kwargs:
-                        config = m_kwargs['model_config']
-                    
-                    if config and hasattr(config, 'direct_mode') and config.direct_mode:
-                        m_kwargs['local'] = True
-                        
+                # If direct_mode is True, bypass the proxy and call the original method directly
+                if config and hasattr(config, 'direct_mode') and config.direct_mode:
                     return original_method(self, *m_args, **m_kwargs)
                 
-                setattr(isolated_cls, func_name, wrapped_method)
+                # Otherwise, call the proxy method (which runs in the isolated venv)
+                return proxy_method(self, *m_args, **m_kwargs)
+            
+            setattr(isolated_cls, func_name, wrapped_method)
                     
         return isolated_cls
         
