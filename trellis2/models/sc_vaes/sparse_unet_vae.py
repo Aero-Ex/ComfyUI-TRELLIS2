@@ -472,6 +472,7 @@ class SparseUnetVaeDecoder(nn.Module):
         self.pred_subdiv = pred_subdiv
         self.dtype = torch.float16 if use_fp16 else torch.float32
         self._low_vram = False
+        self.chunk_size = 65536
          
         self.output_layer = sp.SparseLinear(model_channels[-1], out_channels)
         self.from_latent = sp.SparseLinear(latent_channels, model_channels[0])
@@ -568,7 +569,7 @@ class SparseUnetVaeDecoder(nn.Module):
                     h = block(h)
         h = h.type(x.dtype)
         if self.low_vram:
-            new_feats = _apply_in_chunks(lambda x: F.layer_norm(x, x.shape[-1:]), h.feats)
+            new_feats = _apply_in_chunks(lambda x: F.layer_norm(x, x.shape[-1:]), h.feats, self.chunk_size)
             h = h.replace(new_feats)
         else:
             h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
