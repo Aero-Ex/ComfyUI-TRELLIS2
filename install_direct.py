@@ -18,14 +18,24 @@ After installation, set direct_mode=True in the Load TRELLIS.2 Models node.
 
 import sys
 import subprocess
+import platform as platform_module
 
 
-# Pre-built wheel sources for CUDA 12.8 + PyTorch 2.8.0
-WHEEL_INDEXES = {
-    "cumesh": "https://pozzettiandrea.github.io/cumesh-wheels/cu128-torch280/",
-    "flex_gemm": "https://pozzettiandrea.github.io/flexgemm-wheels/cu128-torch280/",
-    "o_voxel": "https://pozzettiandrea.github.io/ovoxel-wheels/cu128-torch280/",
-}
+def get_wheel_url(pkg_name: str, py_version: str, platform_tag: str) -> str:
+    """Get direct wheel URL for a CUDA extension package."""
+    # Base URLs for each package
+    base_urls = {
+        "cumesh": "https://github.com/PozzettiAndrea/cumesh-wheels/releases/download/cu128-torch280",
+        "flex_gemm": "https://github.com/PozzettiAndrea/flexgemm-wheels/releases/download/cu128-torch280",
+        "o_voxel": "https://github.com/PozzettiAndrea/ovoxel-wheels/releases/download/cu128-torch280",
+    }
+    
+    # Wheel filename format: {pkg}-0.0.1+cu128torch28-{cpXXX}-{cpXXX}-{platform}.whl
+    wheel_name = f"{pkg_name}-0.0.1+cu128torch28-{py_version}-{py_version}-{platform_tag}.whl"
+    return f"{base_urls[pkg_name]}/{wheel_name}"
+
+
+CUDA_EXTENSION_PACKAGES = ["cumesh", "flex_gemm", "o_voxel"]
 
 
 def main():
@@ -82,12 +92,26 @@ def main():
     print("Step 2: Installing CUDA extensions (CUDA 12.8 + PyTorch 2.8.0)...")
     print("=" * 70)
     
-    for pkg_name, wheel_index in WHEEL_INDEXES.items():
-        print(f"\nInstalling {pkg_name}...")
+    # Determine platform and Python version for wheel selection
+    py_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    if platform_module.system() == "Windows":
+        platform_tag = "win_amd64"
+    else:
+        platform_tag = "linux_x86_64"
+    
+    print(f"Platform: {platform_tag}, Python: {py_version}")
+    print()
+    
+    # Install CUDA extensions directly from wheel URLs
+    # Using direct URL + --no-deps bypasses pip's version string validation
+    # which fails due to metadata mismatch (filename has +cu128torch28 but metadata says 0.0.1)
+    for pkg_name in CUDA_EXTENSION_PACKAGES:
+        wheel_url = get_wheel_url(pkg_name, py_version, platform_tag)
+        print(f"\nInstalling {pkg_name} from {wheel_url}...")
         try:
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install",
-                pkg_name, "--find-links", wheel_index
+                wheel_url, "--no-deps", "--force-reinstall"
             ])
             print(f"         {pkg_name} installed successfully!")
         except subprocess.CalledProcessError as e:
