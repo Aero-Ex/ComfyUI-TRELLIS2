@@ -568,7 +568,6 @@ class SparseUnetVaeDecoder(nn.Module):
                     h = block(h)
         h = h.type(x.dtype)
         if self.low_vram:
-            from ..utils import _apply_in_chunks
             new_feats = _apply_in_chunks(lambda x: F.layer_norm(x, x.shape[-1:]), h.feats)
             h = h.replace(new_feats)
         else:
