@@ -196,24 +196,58 @@ def from_pretrained(path: str, disk_offload_manager=None, model_key: str = None,
                     found_local = True
             
             if not found_local:
-                # No local files found at all - raise error instead of downloading
-                available_files = []
-                if os.path.exists(local_config):
-                    available_files.append(f"config: {local_config}")
-                if os.path.exists(local_weights):
-                    available_files.append(f"safetensors: {local_weights}")
-                if os.path.exists(local_gguf_quant):
-                    available_files.append(f"gguf_quant: {local_gguf_quant}")
-                if os.path.exists(local_gguf):
-                    available_files.append(f"gguf: {local_gguf}")
+                # No local files found - download from HuggingFace
+                print(f"[TRELLIS2] Downloading model from HuggingFace: {repo_id} -> {model_name}", file=sys.stderr, flush=True)
                 
-                raise FileNotFoundError(
-                    f"[TRELLIS2] Model not found locally: {path}\n"
-                    f"  Expected location: {models_dir}\n"
-                    f"  Looking for: {model_name_normalized}.json + weights\n"
-                    f"  Available: {available_files if available_files else 'None'}\n"
-                    f"  Please download the model files manually to: {models_dir}"
-                )
+                try:
+                    from huggingface_hub import hf_hub_download
+                    
+                    # Download config file
+                    hf_config_path = f"{model_name}.json"
+                    print(f"[TRELLIS2]   Downloading config: {hf_config_path}", file=sys.stderr, flush=True)
+                    downloaded_config = hf_hub_download(
+                        repo_id=repo_id,
+                        filename=hf_config_path,
+                        local_dir=models_dir,
+                        local_dir_use_symlinks=False
+                    )
+                    config_file = local_config
+                    
+                    # Download weights file (safetensors)
+                    hf_weights_path = f"{model_name}.safetensors"
+                    print(f"[TRELLIS2]   Downloading weights: {hf_weights_path}", file=sys.stderr, flush=True)
+                    downloaded_weights = hf_hub_download(
+                        repo_id=repo_id,
+                        filename=hf_weights_path,
+                        local_dir=models_dir,
+                        local_dir_use_symlinks=False
+                    )
+                    model_file = local_weights
+                    is_gguf = False
+                    
+                    print(f"[TRELLIS2]   Downloaded to: {models_dir}", file=sys.stderr, flush=True)
+                    
+                except Exception as e:
+                    # Download failed - provide helpful error
+                    available_files = []
+                    if os.path.exists(local_config):
+                        available_files.append(f"config: {local_config}")
+                    if os.path.exists(local_weights):
+                        available_files.append(f"safetensors: {local_weights}")
+                    if os.path.exists(local_gguf_quant):
+                        available_files.append(f"gguf_quant: {local_gguf_quant}")
+                    if os.path.exists(local_gguf):
+                        available_files.append(f"gguf: {local_gguf}")
+                    
+                    raise FileNotFoundError(
+                        f"[TRELLIS2] Model not found locally and download failed: {path}\n"
+                        f"  HuggingFace repo: {repo_id}\n"
+                        f"  Download error: {e}\n"
+                        f"  Expected location: {models_dir}\n"
+                        f"  Looking for: {model_name_normalized}.json + weights\n"
+                        f"  Available: {available_files if available_files else 'None'}\n"
+                        f"  Please download the model files manually to: {models_dir}"
+                    ) from e
 
     with open(config_file, 'r') as f:
         config = json.load(f)
