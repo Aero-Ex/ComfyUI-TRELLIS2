@@ -5,6 +5,8 @@ Direct installation script for TRELLIS2 dependencies.
 This installs all dependencies INTO THE HOST PYTHON ENVIRONMENT,
 bypassing the isolated venv. Use this when you want to run with direct_mode=True.
 
+Downloads pre-built CUDA wheels for Python 3.10 from JeffreyXiang's repository.
+
 WARNING: This may cause conflicts with other ComfyUI nodes. Use at your own risk.
 
 Usage:
@@ -15,40 +17,31 @@ After installation, set direct_mode=True in the Load TRELLIS.2 Models node.
 
 import sys
 import os
-import platform
 import subprocess
 from pathlib import Path
 
 
-def get_cuda_version():
-    """Detect CUDA version from nvcc or torch."""
-    try:
-        import torch
-        if torch.cuda.is_available():
-            cuda_version = torch.version.cuda
-            if cuda_version:
-                major, minor = cuda_version.split(".")[:2]
-                return f"cu{major}{minor}"
-    except ImportError:
-        pass
-    
-    # Check nvcc
-    try:
-        result = subprocess.run(["nvcc", "--version"], capture_output=True, text=True)
-        if result.returncode == 0:
-            import re
-            match = re.search(r"release (\d+)\.(\d+)", result.stdout)
-            if match:
-                return f"cu{match.group(1)}{match.group(2)}"
-    except:
-        pass
-    
-    return "cu124"  # Default fallback
+# Wheel download URLs for cp310 Linux x86_64
+WHEEL_BASE_URL = "https://github.com/JeffreyXiang/Storages/releases/download/Space_Wheels_251210"
 
+CUDA_WHEELS = [
+    f"{WHEEL_BASE_URL}/cumesh-0.0.1-cp310-cp310-linux_x86_64.whl",
+    f"{WHEEL_BASE_URL}/flex_gemm-0.0.1-cp310-cp310-linux_x86_64.whl",
+    f"{WHEEL_BASE_URL}/o_voxel-0.0.1-cp310-cp310-linux_x86_64.whl",
+    f"{WHEEL_BASE_URL}/nvdiffrast-0.3.5-cp310-cp310-linux_x86_64.whl",
+    f"{WHEEL_BASE_URL}/nvdiffrec_render-0.0.0-cp310-cp310-linux_x86_64.whl",
+]
 
-def get_python_version():
-    """Get Python major.minor version string."""
-    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+# HuggingFace mirror (alternative)
+HF_WHEEL_BASE = "https://huggingface.co/spaces/JeffreyXiang/TRELLIS.2/resolve/main/wheels"
+
+HF_CUDA_WHEELS = [
+    f"{HF_WHEEL_BASE}/cumesh-0.0.1-cp310-cp310-linux_x86_64.whl",
+    f"{HF_WHEEL_BASE}/flex_gemm-0.0.1-cp310-cp310-linux_x86_64.whl", 
+    f"{HF_WHEEL_BASE}/o_voxel-0.0.1-cp310-cp310-linux_x86_64.whl",
+    f"{HF_WHEEL_BASE}/nvdiffrast-0.3.5-cp310-cp310-linux_x86_64.whl",
+    f"{HF_WHEEL_BASE}/nvdiffrec_render-0.0.0-cp310-cp310-linux_x86_64.whl",
+]
 
 
 def main():
@@ -60,18 +53,20 @@ def main():
     print("         This may conflict with other packages. Use at your own risk.")
     print()
     
-    cuda_version = get_cuda_version()
-    python_version = get_python_version()
+    # Check Python version
+    py_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    print(f"Python version: {py_version}")
     
-    print(f"Detected CUDA: {cuda_version}")
-    print(f"Python: {python_version}")
-    print()
+    if sys.version_info[:2] != (3, 10):
+        print()
+        print("WARNING: Pre-built wheels are for Python 3.10 (cp310).")
+        print(f"         Your Python is {py_version}. Wheels may not work!")
+        print()
     
     # PyPI packages (platform-independent)
     pypi_packages = [
         "huggingface_hub>=0.20.0,<1.0.0",
         "hf_transfer",
-        "hf_xet",
         "transformers>=4.56.0",
         "safetensors",
         "pillow>=9.0.0",
@@ -91,22 +86,6 @@ def main():
         "setuptools",
     ]
     
-    # CUDA extensions from custom index
-    cuda_index = "https://storage.googleapis.com/comfy-env-wheels/cuda/"
-    cuda_packages = [
-        f"nvdiffrast==0.4.0+{cuda_version}",
-        f"flex_gemm==0.0.1+{cuda_version}",
-        f"cumesh==0.0.1+{cuda_version}",
-        f"o_voxel==0.0.1+{cuda_version}",
-        f"nvdiffrec_render==0.0.1+{cuda_version}",
-    ]
-    
-    # Optional: sageattention and flash-attn (may fail on some systems)
-    optional_cuda = [
-        f"sageattention==2.2.0+{cuda_version}",
-        f"flash-attn==2.8.3+{cuda_version}",
-    ]
-    
     # Install PyPI packages
     print("=" * 70)
     print("Step 1: Installing PyPI packages...")
@@ -120,38 +99,30 @@ def main():
         print(f"ERROR: Failed to install PyPI packages: {e}")
         return 1
     
-    # Install CUDA extensions
+    # Install CUDA extensions from GitHub
     print()
     print("=" * 70)
-    print("Step 2: Installing CUDA extensions...")
+    print("Step 2: Installing CUDA extensions (cp310 Linux x86_64)...")
     print("=" * 70)
     
-    for pkg in cuda_packages:
-        print(f"\nInstalling {pkg}...")
+    # Try GitHub first, then HuggingFace
+    for wheel_url in CUDA_WHEELS:
+        wheel_name = wheel_url.split("/")[-1]
+        print(f"\nInstalling {wheel_name}...")
         try:
             subprocess.check_call([
-                sys.executable, "-m", "pip", "install",
-                "--no-deps", "--index-url", cuda_index, pkg
-            ])
-        except subprocess.CalledProcessError as e:
-            print(f"WARNING: Failed to install {pkg}: {e}")
-            print("         You may need to build from source.")
-    
-    # Install optional CUDA packages
-    print()
-    print("=" * 70)
-    print("Step 3: Installing optional CUDA packages (may fail)...")
-    print("=" * 70)
-    
-    for pkg in optional_cuda:
-        print(f"\nInstalling {pkg}...")
-        try:
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install",
-                "--no-deps", "--index-url", cuda_index, pkg
+                sys.executable, "-m", "pip", "install", "--no-deps", wheel_url
             ])
         except subprocess.CalledProcessError:
-            print(f"         Skipped (optional)")
+            # Try HuggingFace mirror
+            hf_url = wheel_url.replace(WHEEL_BASE_URL, HF_WHEEL_BASE)
+            print(f"         Trying HuggingFace mirror...")
+            try:
+                subprocess.check_call([
+                    sys.executable, "-m", "pip", "install", "--no-deps", hf_url
+                ])
+            except subprocess.CalledProcessError as e:
+                print(f"WARNING: Failed to install {wheel_name}: {e}")
     
     print()
     print("=" * 70)
